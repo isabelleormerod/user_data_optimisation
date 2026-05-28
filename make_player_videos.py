@@ -384,6 +384,66 @@ def _bbox_from_points(pts):
 
 
 # ----------------------------------------------------------------------------
+# Anatomical 3D view setup (shared by all streams)
+# ----------------------------------------------------------------------------
+#
+# Coordinate convention in the data:
+#   data_x = vertical, but INCREASING DOWNWARD (head has smaller x than feet)
+#   data_y = anterior-posterior (front/back); sagittal plane parallel to x-y
+#   data_z = medial-lateral (left/right); floor is the z-y plane
+#
+# matplotlib's 3D vertical axis is always plot-z. To make data_x the true
+# on-screen vertical we REMAP every plotted point:
+#   plot_x = data_y,  plot_y = data_z,  plot_z = data_x
+# and invert the plot_z limits so the head (small data_x) is at the top.
+
+BODY_VIEW_ELEV = 15    # head-up three-quarter view
+BODY_VIEW_AZIM = -60
+
+
+def remap_point(p):
+    """Remap (data_x, data_y, data_z) -> (plot_x, plot_y, plot_z) so that
+    data_x is drawn on matplotlib's vertical (plot-z) axis."""
+    dx, dy, dz = p
+    return (dy, dz, dx)
+
+
+def setup_anatomical_axes(ax, bbox, equal_aspect=True, elev=None, azim=None):
+    """Configure a 3D axis so data_x is the on-screen vertical (head up).
+
+    `bbox` is in DATA coords: ((x_lo,x_hi),(y_lo,y_hi),(z_lo,z_hi)).
+    Points must be plotted through remap_point() to line up with this.
+    """
+    if elev is None:
+        elev = BODY_VIEW_ELEV
+    if azim is None:
+        azim = BODY_VIEW_AZIM
+    xlim, ylim, zlim = bbox  # data x, y, z ranges
+
+    # plot_x = data_y, plot_y = data_z, plot_z = data_x (inverted -> head up)
+    ax.set_xlim(ylim)
+    ax.set_ylim(zlim)
+    ax.set_zlim(xlim[1], xlim[0])
+    ax.set_xlabel("y (front/back)")
+    ax.set_ylabel("z (left/right)")
+    ax.set_zlabel("x (up/down)")
+
+    if equal_aspect:
+        ranges = [abs(ylim[1] - ylim[0]),
+                  abs(zlim[1] - zlim[0]),
+                  abs(xlim[1] - xlim[0])]
+        ranges = [r if r > 1e-9 else 1.0 for r in ranges]
+        try:
+            ax.set_box_aspect(ranges)
+        except Exception:
+            pass  # older matplotlib without set_box_aspect
+
+    ax.view_init(elev=elev, azim=azim)
+
+
+
+
+# ----------------------------------------------------------------------------
 # Quaternion -> direction vector
 # ----------------------------------------------------------------------------
 
@@ -471,7 +531,7 @@ def _make_progress_callback(label: str, total: int):
 
 
 def render_hand_video(frames: list, output_path: Path, output_fps: float,
-                      colour_by_quality: bool, relative_wrist: bool = False):
+                      colour_by_quality: bool, view_elev=None, view_azim=None):
     if not frames:
         print(f"  No hand frames to render; skipping {output_path.name}")
         return
@@ -483,35 +543,16 @@ def render_hand_video(frames: list, output_path: Path, output_fps: float,
             all_joints.update(h["joints"].keys())
     edges = detect_hand_edges(sorted(all_joints))
 
-    # If rendering relative to wrist, compute bbox after shifting per-frame.
     bbox = compute_bbox_hand(frames)
 
     # Hand-type colours. Anything else falls back to a neutral grey.
     HAND_COLOURS = {"Left": "#1f77b4", "Right": "#d62728"}
     DEFAULT_HAND_COLOUR = "#7f7f7f"
 
-    # If rendering relative to wrist, compute bbox from wrist-relative points
-    if relative_wrist:
-        rel_pts = []
-        for f in frames:
-            for h in f["hands"]:
-                joints = h["joints"]
-                wrist_keys = [k for k in joints.keys() if "Wrist" in k]
-                wrist_pos = None
-                if wrist_keys:
-                    wrist_pos = joints.get("HandWristRoot") or joints.get(wrist_keys[0])
-                if wrist_pos is None or not all(v is not None for v in wrist_pos):
-                    continue
-                for p in joints.values():
-                    if p is not None and all(v is not None for v in p):
-                        rel_pts.append((p[0] - wrist_pos[0], p[1] - wrist_pos[1], p[2] - wrist_pos[2]))
-        if rel_pts:
-            bbox = _bbox_from_points(rel_pts)
-
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
-    ax.set_xlim(bbox[0]); ax.set_ylim(bbox[1]); ax.set_zlim(bbox[2])
-    ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
+    setup_anatomical_axes(ax, bbox, equal_aspect=True,
+                          elev=view_elev, azim=view_azim)
     title = ax.set_title("")
 
     # Static legend so the user can tell which hand is which colour
@@ -538,22 +579,9 @@ def render_hand_video(frames: list, output_path: Path, output_fps: float,
         for hand in f["hands"]:
             colour = HAND_COLOURS.get(hand["type"], DEFAULT_HAND_COLOUR)
             joints = hand["joints"]
-            # If requested, shift joints so the wrist is at origin (0,0,0)
-            if relative_wrist:
-                wrist_keys = [k for k in joints.keys() if "Wrist" in k]
-                wrist_pos = None
-                if wrist_keys:
-                    # Prefer exact HandWristRoot if present
-                    if "HandWristRoot" in joints:
-                        wrist_pos = joints["HandWristRoot"]
-                    else:
-                        wrist_pos = joints[wrist_keys[0]]
-                if wrist_pos is not None and all(v is not None for v in wrist_pos):
-                    shifted = {jid: ((p[0] - wrist_pos[0]), (p[1] - wrist_pos[1]), (p[2] - wrist_pos[2]))
-                               for jid, p in joints.items() if p is not None}
-                    joints = shifted
-            # Points
-            pts = [v for v in joints.values() if all(c is not None for c in v)]
+            # Points (remapped so data_x is vertical)
+            pts = [remap_point(v) for v in joints.values()
+                   if all(c is not None for c in v)]
             if pts:
                 xs, ys, zs = zip(*pts)
                 sc = ax.scatter(xs, ys, zs, color=colour, s=20)
@@ -563,6 +591,7 @@ def render_hand_video(frames: list, output_path: Path, output_fps: float,
                 if a in joints and b in joints:
                     pa, pb = joints[a], joints[b]
                     if all(c is not None for c in pa) and all(c is not None for c in pb):
+                        pa, pb = remap_point(pa), remap_point(pb)
                         ln, = ax.plot(
                             [pa[0], pb[0]], [pa[1], pb[1]], [pa[2], pb[2]],
                             color=colour, linewidth=1.5,
@@ -581,7 +610,7 @@ def render_hand_video(frames: list, output_path: Path, output_fps: float,
 
 
 def render_body_video(frames: list, output_path: Path, output_fps: float,
-                      colour_by_quality: bool, project_to_floor_2d: bool = False):
+                      colour_by_quality: bool, view_elev=None, view_azim=None):
     if not frames:
         print(f"  No body frames to render; skipping {output_path.name}")
         return
@@ -589,17 +618,9 @@ def render_body_video(frames: list, output_path: Path, output_fps: float,
     bbox = compute_bbox_body(frames)
 
     fig = plt.figure(figsize=(8, 8))
-    if project_to_floor_2d:
-        ax = fig.add_subplot(111)
-        ax.set_xlabel("y (floor)"); ax.set_ylabel("z (floor)")
-        # Use bbox projected to y,z
-        ay = bbox[1]
-        az = bbox[2]
-        ax.set_xlim(ay); ax.set_ylim(az)
-    else:
-        ax = fig.add_subplot(111, projection="3d")
-        ax.set_xlim(bbox[0]); ax.set_ylim(bbox[1]); ax.set_zlim(bbox[2])
-        ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
+    ax = fig.add_subplot(111, projection="3d")
+    setup_anatomical_axes(ax, bbox, equal_aspect=True,
+                          elev=view_elev, azim=view_azim)
     title = ax.set_title("")
 
     scatter_artists = []
@@ -615,33 +636,24 @@ def render_body_video(frames: list, output_path: Path, output_fps: float,
         colour = QUALITY_COLOURS.get(f["quality"], "#000000") if colour_by_quality else "#1f77b4"
 
         lms = f["landmarks"]
-        pts = [v for v in lms.values() if all(c is not None for c in v)]
+        pts = [remap_point(v) for v in lms.values()
+               if all(c is not None for c in v)]
         if pts:
-            if project_to_floor_2d:
-                ys, zs = zip(*[(p[1], p[2]) for p in pts])
-                sc = ax.scatter(ys, zs, color=colour, s=15)
-                scatter_artists.append(sc)
-            else:
-                xs, ys, zs = zip(*pts)
-                sc = ax.scatter(xs, ys, zs, color=colour, s=15)
-                scatter_artists.append(sc)
-
+            xs, ys, zs = zip(*pts)
+            sc = ax.scatter(xs, ys, zs, color=colour, s=15)
+            scatter_artists.append(sc)
         for a, b in BODY_EDGES:
             if a in lms and b in lms:
                 pa, pb = lms[a], lms[b]
                 if all(c is not None for c in pa) and all(c is not None for c in pb):
-                    if project_to_floor_2d:
-                        ln, = ax.plot([pa[1], pb[1]], [pa[2], pb[2]], color=colour, linewidth=2)
-                    else:
-                        ln, = ax.plot(
-                            [pa[0], pb[0]], [pa[1], pb[1]], [pa[2], pb[2]],
-                            color=colour, linewidth=2,
-                        )
+                    pa, pb = remap_point(pa), remap_point(pb)
+                    ln, = ax.plot(
+                        [pa[0], pb[0]], [pa[1], pb[1]], [pa[2], pb[2]],
+                        color=colour, linewidth=2,
+                    )
                     line_artists.append(ln)
 
         title.set_text(f"Body  t={f['t_s']:.2f}s  quality={f['quality']}")
-        if not project_to_floor_2d:
-            ax.view_init(elev=20, azim=(i * 0.5) % 360)
         return scatter_artists + line_artists + [title]
 
     anim = FuncAnimation(fig, update, frames=len(frames), interval=1000 / output_fps,
@@ -654,7 +666,8 @@ def render_body_video(frames: list, output_path: Path, output_fps: float,
 
 def render_pen_video(frames: list, output_path: Path, output_fps: float,
                      colour_by_quality: bool, trail_seconds: float,
-                     direction_length: float = None):
+                     direction_length: float = None,
+                     view_elev=None, view_azim=None):
     if not frames:
         print(f"  No pen frames to render; skipping {output_path.name}")
         return
@@ -667,8 +680,8 @@ def render_pen_video(frames: list, output_path: Path, output_fps: float,
 
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
-    ax.set_xlim(bbox[0]); ax.set_ylim(bbox[1]); ax.set_zlim(bbox[2])
-    ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
+    setup_anatomical_axes(ax, bbox, equal_aspect=True,
+                          elev=view_elev, azim=view_azim)
     title = ax.set_title("")
 
     tip_artists = []
@@ -685,16 +698,19 @@ def render_pen_video(frames: list, output_path: Path, output_fps: float,
 
         colour = QUALITY_COLOURS.get(f["quality"], "#000000") if colour_by_quality else "#1f77b4"
         tip = f["pos"]
-        # Tip
-        sc = ax.scatter([tip[0]], [tip[1]], [tip[2]], color=colour, s=80)
-        tip_artists.append(sc)
-        # Direction line
+        # Direction end in data space, then remap both tip and end
         fwd = quat_forward(*f["rot"])
         end = (tip[0] + direction_length * fwd[0],
                tip[1] + direction_length * fwd[1],
                tip[2] + direction_length * fwd[2])
+        tip_r = remap_point(tip)
+        end_r = remap_point(end)
+        # Tip
+        sc = ax.scatter([tip_r[0]], [tip_r[1]], [tip_r[2]], color=colour, s=80)
+        tip_artists.append(sc)
+        # Direction line
         ln, = ax.plot(
-            [tip[0], end[0]], [tip[1], end[1]], [tip[2], end[2]],
+            [tip_r[0], end_r[0]], [tip_r[1], end_r[1]], [tip_r[2], end_r[2]],
             color=colour, linewidth=3,
         )
         dir_artists.append(ln)
@@ -707,7 +723,7 @@ def render_pen_video(frames: list, output_path: Path, output_fps: float,
                 tk = frames[k]["t_s"]
                 if tk is None or t_now - tk > trail_seconds:
                     break
-                trail_pts.append(frames[k]["pos"])
+                trail_pts.append(remap_point(frames[k]["pos"]))
             if len(trail_pts) >= 2:
                 xs, ys, zs = zip(*trail_pts)
                 ln2, = ax.plot(xs, ys, zs, color="#888888", linewidth=1, alpha=0.6)
@@ -750,10 +766,10 @@ def main():
                     help="Playback speed (1.0 = real-time, 0.5 = half-speed)")
     ap.add_argument("--trail-seconds", type=float, default=0.0,
                     help="Pen trail length in seconds (0 = no trail, default: 0)")
-    ap.add_argument("--body-2d", action="store_true",
-                    help="Render body as 2D projection onto the floor (y,z plane)")
-    ap.add_argument("--hand-relative-wrist", action="store_true",
-                    help="Render hand views with the wrist set to (0,0,0) per-frame")
+    ap.add_argument("--view-elev", type=float, default=None,
+                    help=f"3D view elevation angle (default: {BODY_VIEW_ELEV})")
+    ap.add_argument("--view-azim", type=float, default=None,
+                    help=f"3D view azimuth angle (default: {BODY_VIEW_AZIM})")
     args = ap.parse_args()
 
     if not args.json_path.is_file():
@@ -841,17 +857,18 @@ def main():
         out = folder / f"{stem}_hand{src_tag}.mp4"
         print(f"\nRendering hand -> {out.name}")
         render_hand_video(hand_frames, out, args.output_fps, colour_by_quality,
-                          relative_wrist=args.hand_relative_wrist)
+                          view_elev=args.view_elev, view_azim=args.view_azim)
     if "body" in args.streams and body_frames:
         out = folder / f"{stem}_body{src_tag}.mp4"
         print(f"\nRendering body -> {out.name}")
         render_body_video(body_frames, out, args.output_fps, colour_by_quality,
-                          project_to_floor_2d=args.body_2d)
+                          view_elev=args.view_elev, view_azim=args.view_azim)
     if "pen" in args.streams and pen_frames:
         out = folder / f"{stem}_pen{src_tag}.mp4"
         print(f"\nRendering pen -> {out.name}")
         render_pen_video(pen_frames, out, args.output_fps, colour_by_quality,
-                         args.trail_seconds)
+                         args.trail_seconds,
+                         view_elev=args.view_elev, view_azim=args.view_azim)
 
     print("\nDone.")
 
