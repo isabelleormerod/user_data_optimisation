@@ -184,6 +184,14 @@ def convert_frame_to_t_s(frame_idx: int, pen_timestamps: list,
     return (t_s, quality)
 
 
+_TIMESTAMP_SUFFIX_RE = re.compile(r'_\d{8}_\d{6}$')
+
+
+def strip_timestamp_suffix(stem: str) -> str:
+    """Strip a trailing YYYYMMDD_HHMMSS timestamp from a stem."""
+    return _TIMESTAMP_SUFFIX_RE.sub("", stem)
+
+
 def video_stem_folder(json_path: Path) -> tuple:
     """Where the canonical tracking CSVs live (matches sync_to_pen_time.py):
         <root>/<participant>/<video_stem>/
@@ -197,7 +205,8 @@ def video_stem_folder(json_path: Path) -> tuple:
     else:
         stem = json_path.stem
     participant = stem.split("_", 1)[0]
-    folder = json_path.parent / participant / stem
+    folder_stem = strip_timestamp_suffix(stem)
+    folder = json_path.parent / participant / folder_stem
     return folder, stem
 
 

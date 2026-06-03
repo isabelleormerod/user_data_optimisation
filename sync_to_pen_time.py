@@ -42,6 +42,7 @@ Usage:
 import argparse
 import csv
 import json
+import re
 import sys
 from bisect import bisect_left
 from pathlib import Path
@@ -248,12 +249,20 @@ def write_csv(path: Path, rows: list) -> None:
 # Main
 # ----------------------------------------------------------------------------
 
+_TIMESTAMP_SUFFIX_RE = re.compile(r'_\d{8}_\d{6}$')
+
+
+def strip_timestamp_suffix(stem: str) -> str:
+    """Strip a trailing YYYYMMDD_HHMMSS timestamp from a stem."""
+    return _TIMESTAMP_SUFFIX_RE.sub("", stem)
+
+
 def resolve_output(json_path: Path) -> tuple:
     """Determine the per-trial output folder and file stem.
 
     Layout:
         <root>/<stem>.csv.json   (master JSON; may also be plain <stem>.json)
-        ->  <root>/<participant>/<stem>/   (per-trial output folder)
+        ->  <root>/<participant>/<stem_without_timestamp>/   (per-trial output folder)
 
     Where:
         stem        = JSON filename with '.csv.json' or '.json' stripped
@@ -270,7 +279,8 @@ def resolve_output(json_path: Path) -> tuple:
         stem = json_path.stem
 
     participant = stem.split("_", 1)[0]
-    folder = json_path.parent / participant / stem
+    folder_stem = strip_timestamp_suffix(stem)
+    folder = json_path.parent / participant / folder_stem
     folder.mkdir(parents=True, exist_ok=True)
     return folder, stem
 

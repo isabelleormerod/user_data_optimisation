@@ -2,35 +2,37 @@
 """
 Flatten pen data onto a calibration plane.
 
-Resolves all file paths automatically from a single trial stem.  You only
-need to supply the stem and (once) the root paths for your data.
+Resolves all file paths automatically from a single trial identifier (the BORIS
+observation id, which is also the trial folder name).
 
-Stem format:  <PID>_<trial_descriptor>
-Example:      P003_Short_Large_Front_weighted_A135
+Folder layout assumed (timestamps already stripped by the pipeline; the synced
+BORIS file lives inside the trial folder):
+  <landmarks_root>/<PID>/<stem>/<stem>_pen.csv
+  <landmarks_root>/<PID>/<stem>/<stem>_boris_synced.csv
+  <landmarks_root>/<PID>/<stem>/<stem>_pen_flattened.csv   (output, written here)
+  <landmarks_root>/plane_quality_log.csv                   (shared quality log)
 
-File layout assumed:
-  Pen CSV:
-    <landmarks_root>/<PID>/<stem>_<datetime>/<stem>_<datetime>_pen.csv
+where <stem> is the trial / observation id, e.g.
+  P003_Long_Large_Front_weighted_A180
+and <PID> is its first token, e.g. P003.
 
-  Synced BORIS:
-    <boris_root>/<stem>_synced.tsv
-
-  Flattened output (written here):
-    <landmarks_root>/<PID>/<stem>_<datetime>/<stem>_<datetime>_pen_flattened.csv
-
-  Quality log (appended, shared across all participants):
-    <landmarks_root>/plane_quality_log.csv
-
-Default roots (edit these two lines to match your machine, then you never
-need to pass them on the command line again):
+Default root (edit to match your machine, then you never need to pass it):
     LANDMARKS_ROOT = A:/Automated_chain_BETA/Participant_Landmarks
-    BORIS_ROOT     = A:/Automated_chain_BETA/BORIS_csvs
 
 Usage:
-    python flatten_pen_to_plane.py P003_Short_Large_Front_weighted_A135
-    python flatten_pen_to_plane.py P003_Short_Large_Front_weighted_A135 \\
-        --landmarks-root "D:/MyData/Participant_Landmarks" \\
-        --boris-root "D:/MyData/BORIS_csvs"
+    python flatten_pen_to_plane.py P003_Long_Large_Front_weighted_A180
+    python flatten_pen_to_plane.py P003_Long_Large_Front_weighted_A180 \\
+        --landmarks-root "D:/MyData/Participant_Landmarks"
+
+Per-participant usage (process all trials for one or more participants):
+    # Process all trials for a single participant P003
+    python flatten_pen_to_plane.py --participants P003
+
+    # Process multiple participants (comma-separated)
+    python flatten_pen_to_plane.py --participants P003,P004
+
+    # Dry-run to list which trials would be processed for participant P003
+    python flatten_pen_to_plane.py --participants P003 --dry-run
 """
 
 import argparse
@@ -42,10 +44,32 @@ from pathlib import Path
 import numpy as np
 
 # ------------------------------------------------------------------ #
-# *** EDIT THESE TWO LINES TO MATCH YOUR MACHINE ***
+# *** EDIT THIS LINE TO MATCH YOUR MACHINE ***
 DEFAULT_LANDMARKS_ROOT = Path("A:/Automated_chain_BETA/Participant_Landmarks")
+# Kept for CLI backwards-compatibility; no longer used for resolution.
 DEFAULT_BORIS_ROOT     = Path("A:/Automated_chain_BETA/BORIS_csvs")
 # ------------------------------------------------------------------ #
+
+
+def iter_trial_stems(landmarks_root: Path, participants: set = None):
+    """Yield (stem, participant) for every trial folder under the root that
+    contains both a *_pen.csv and a *_boris_synced.csv.
+
+    Layout: <root>/<PID>/<stem>/<stem>_pen.csv etc.
+    If `participants` is given (a set of PIDs), only those are yielded.
+    """
+    if not landmarks_root.is_dir():
+        return
+    for pid_dir in sorted(p for p in landmarks_root.iterdir() if p.is_dir()):
+        pid = pid_dir.name
+        if participants is not None and pid not in participants:
+            continue
+        for trial_dir in sorted(t for t in pid_dir.iterdir() if t.is_dir()):
+            stem = trial_dir.name
+            pen = trial_dir / f"{stem}_pen.csv"
+            boris = trial_dir / f"{stem}_boris_synced.csv"
+            if pen.is_file() and boris.is_file():
+                yield stem, pid
 
 
 # --------------------------------------------------------------------------- #
@@ -53,12 +77,15 @@ DEFAULT_BORIS_ROOT     = Path("A:/Automated_chain_BETA/BORIS_csvs")
 # --------------------------------------------------------------------------- #
 def resolve_paths(stem: str,
                   landmarks_root: Path,
-                  boris_root: Path) -> dict:
+                  boris_root: Path = None) -> dict:
     """
-    Given a trial stem (e.g. 'P003_Short_Large_Front_weighted_A135'), find:
+    Given a trial identifier (the BORIS observation id, which is also the trial
+    folder name, e.g. 'P003_Long_Large_Front_weighted_A180'), find:
       - participant ID  (first token, e.g. 'P003')
-      - datetime-stamped subfolder  (<stem>_YYYYMMDD_HHMMSS)
-      - pen CSV, synced BORIS, intended output path, quality log path
+      - the trial folder  <root>/<PID>/<stem>/
+      - pen CSV, synced BORIS, output path, quality log path
+
+    `boris_root` is accepted but unused now (kept for CLI backwards-compat).
 
     Raises FileNotFoundError with a clear message if anything is missing.
     """
@@ -70,29 +97,17 @@ def resolve_paths(stem: str,
             f"Participant folder not found: {participant_dir}\n"
             f"  (landmarks_root = {landmarks_root})")
 
-    # Find the datetime-stamped subfolder: must start with stem + '_'
-    # and end with an 8-digit date + 6-digit time.
-    matches = [
-        d for d in participant_dir.iterdir()
-        if d.is_dir() and d.name.startswith(stem + "_")
-    ]
-    if not matches:
+    trial_dir = participant_dir / stem
+    if not trial_dir.is_dir():
+        available = [d.name for d in participant_dir.iterdir() if d.is_dir()]
         raise FileNotFoundError(
-            f"No subfolder starting with '{stem}_' found inside:\n"
-            f"  {participant_dir}\n"
-            f"  Available folders: {[d.name for d in participant_dir.iterdir() if d.is_dir()]}")
-    if len(matches) > 1:
-        raise FileNotFoundError(
-            f"Multiple subfolders match '{stem}_' inside {participant_dir}:\n"
-            f"  {[d.name for d in matches]}\n"
-            f"  Please ensure only one datetime-stamped folder exists per stem.")
+            f"Trial folder not found: {trial_dir}\n"
+            f"  Expected a folder named exactly '{stem}' inside {participant_dir}\n"
+            f"  Available folders: {available}")
 
-    trial_dir   = matches[0]                         # e.g. …/P003/P003_…_113934/
-    trial_stamp = trial_dir.name                     # e.g. P003_…_113934
-
-    pen_path    = trial_dir / f"{trial_stamp}_pen.csv"
-    output_path = trial_dir / f"{trial_stamp}_pen_flattened.csv"
-    boris_path  = boris_root / f"{stem}_synced.tsv"
+    pen_path    = trial_dir / f"{stem}_pen.csv"
+    output_path = trial_dir / f"{stem}_pen_flattened.csv"
+    boris_path  = trial_dir / f"{stem}_boris_synced.csv"
     log_path    = landmarks_root / "plane_quality_log.csv"
 
     missing = []
@@ -101,15 +116,17 @@ def resolve_paths(stem: str,
     if not boris_path.is_file():
         missing.append(f"  Synced BORIS: {boris_path}")
     if missing:
+        present = [p.name for p in trial_dir.iterdir() if p.is_file()]
         raise FileNotFoundError(
-            "Expected file(s) not found:\n" + "\n".join(missing))
+            "Expected file(s) not found:\n" + "\n".join(missing)
+            + f"\n  Files present in {trial_dir.name}: {present}")
 
     return {
         "pen_path":    pen_path,
         "boris_path":  boris_path,
         "output_path": output_path,
         "log_path":    log_path,
-        "trial_stamp": trial_stamp,
+        "trial_stamp": stem,
         "pid":         pid,
     }
 
@@ -118,18 +135,22 @@ def resolve_paths(stem: str,
 # I/O helpers
 # --------------------------------------------------------------------------- #
 def read_table(path: Path):
-    suffix = path.suffix.lower()
-    if suffix == ".tsv":
+    """Read a delimited table, detecting tab vs comma from the actual content
+    (not the file extension). The synced BORIS file keeps the delimiter of its
+    source, so a .csv may in fact be tab-delimited."""
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        first_line = f.readline()
+    # Decide delimiter from the header line: prefer whichever splits it into
+    # more fields. Tab wins ties because BORIS exports are usually TSV.
+    n_tab = first_line.count("\t")
+    n_comma = first_line.count(",")
+    if n_tab >= n_comma and n_tab > 0:
         delim = "\t"
-    elif suffix == ".csv":
+    elif n_comma > 0:
         delim = ","
     else:
-        with path.open("r", encoding="utf-8-sig", newline="") as f:
-            sample = f.read(4096)
-        try:
-            delim = csv.Sniffer().sniff(sample, delimiters=",\t;").delimiter
-        except csv.Error:
-            delim = ","
+        # Single-column or unknown; fall back to extension then comma
+        delim = "\t" if path.suffix.lower() == ".tsv" else ","
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f, delimiter=delim)
         rows = list(reader)
@@ -218,7 +239,6 @@ def process(pen_path: Path, boris_path: Path, output_path: Path,
             f"  Found columns: {boris_fields}")
 
     # Startup placeholder: the frozen pose emitted before the stylus is tracked.
-    # Any calibration point matching this value is silently not-yet-tracking.
     placeholder = xyz_arr[0].copy()
     first_move_t = None
     moved = np.where(np.any(np.abs(xyz_arr - placeholder) > 1e-5, axis=1))[0]
@@ -389,6 +409,71 @@ def write_quality_log(log_path: Path, res: dict, stem: str, pid: str,
 
 
 # --------------------------------------------------------------------------- #
+# Run a single trial (shared by single + batch modes)
+# --------------------------------------------------------------------------- #
+def run_one(stem: str, landmarks_root: Path, boris_root: Path,
+            calib_prefix: str, max_dt, recenter_xy: bool,
+            outlier_factor: float, verbose: bool = True) -> dict:
+    """Resolve, process, and log one trial. Returns a status dict.
+    Does not raise on the expected FileNotFound / Runtime errors; instead
+    captures them in the returned dict so batch runs continue."""
+    status = {"stem": stem, "status": "pending", "error": None,
+              "n_calib": None, "rms_z_mm": None}
+    try:
+        paths = resolve_paths(stem, landmarks_root, boris_root)
+    except FileNotFoundError as e:
+        status["status"] = "missing_files"
+        status["error"] = str(e)
+        return status
+
+    if verbose:
+        print(f"Trial:        {stem}")
+        print(f"Pen CSV:      {paths['pen_path']}")
+        print(f"Synced BORIS: {paths['boris_path']}")
+        print(f"Output:       {paths['output_path']}")
+        print()
+
+    try:
+        res = process(
+            paths["pen_path"], paths["boris_path"], paths["output_path"],
+            calib_prefix=calib_prefix, max_dt=max_dt,
+            recenter_xy=recenter_xy, outlier_factor=outlier_factor,
+        )
+    except RuntimeError as e:
+        status["status"] = "failed"
+        status["error"] = str(e)
+        return status
+
+    write_quality_log(paths["log_path"], res, stem, paths["pid"],
+                      paths["pen_path"], paths["boris_path"])
+
+    status["status"] = "ok"
+    status["n_calib"] = res["n_calib"]
+    status["rms_z_mm"] = res["rms_z"] * 1000
+    status["n_dropped"] = sum(1 for _, _, n, _ in res["calib_meta"]
+                              if "DROPPED" in n)
+
+    if verbose:
+        print(f"Calibration points ({res['n_calib']} used):")
+        for beh, idx, note, _ in sorted(res["calib_meta"],
+                                        key=lambda x: (x[0] or "")):
+            tag = "  [DROPPED]" if "DROPPED" in note else "  [used]  "
+            print(f"{tag} {beh:<12}  pen_row={str(idx):<6}  {note}")
+        print()
+        print(f"Plane normal:    [{res['normal'][0]:+.4f},  "
+              f"{res['normal'][1]:+.4f},  {res['normal'][2]:+.4f}]")
+        print(f"Plane centroid:  [{res['centroid'][0]:+.4f},  "
+              f"{res['centroid'][1]:+.4f},  {res['centroid'][2]:+.4f}]")
+        print(f"Fit quality  —   RMS: {res['rms_z']*1000:.2f} mm   "
+              f"max: {res['max_z']*1000:.2f} mm")
+        print(f"Pen rows written: {res['n_written']}")
+        print(f"Output:  {res['output_path']}")
+        print(f"Quality log: {paths['log_path']}")
+
+    return status
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 def main():
@@ -397,8 +482,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
     ap.add_argument(
-        "stem",
-        help="Trial stem, e.g. P003_Short_Large_Front_weighted_A135")
+        "stem", nargs="?", default=None,
+        help="Trial / observation id (= trial folder name) for a single run, "
+             "e.g. P003_Long_Large_Front_weighted_A180. Omit when using "
+             "--batch or --participants.")
 
     ap.add_argument(
         "--landmarks-root", type=Path,
@@ -408,8 +495,17 @@ def main():
     ap.add_argument(
         "--boris-root", type=Path,
         default=DEFAULT_BORIS_ROOT,
-        help=f"Folder containing *_synced.tsv files "
-             f"(default: {DEFAULT_BORIS_ROOT})")
+        help="(Deprecated/unused — BORIS synced file is now read from inside "
+             "the trial folder. Accepted for backwards-compatibility.)")
+
+    ap.add_argument(
+        "--batch", action="store_true",
+        help="Process every trial folder under the landmarks root that has "
+             "both a pen CSV and a boris_synced CSV.")
+    ap.add_argument(
+        "--participants", type=str, default=None,
+        help="Comma-separated participant IDs to restrict a batch run to "
+             "(e.g. 'P003,P004'). Implies batch mode over those participants.")
 
     ap.add_argument(
         "--calib-prefix", default="Point",
@@ -427,55 +523,94 @@ def main():
         "--recenter-xy", action="store_true",
         help="Translate so the calibration centroid becomes (0, 0, 0); "
              "default keeps the original x/y position")
+    ap.add_argument(
+        "--dry-run", action="store_true",
+        help="List the trials that would be processed, without doing it "
+             "(batch modes only).")
 
     args = ap.parse_args()
 
-    # ---- resolve paths -------------------------------------------------- #
-    try:
-        paths = resolve_paths(args.stem, args.landmarks_root, args.boris_root)
-    except FileNotFoundError as e:
-        sys.exit(f"ERROR — could not find required files:\n{e}")
+    # Parse participant filter
+    participant_filter = None
+    if args.participants:
+        participant_filter = {p.strip() for p in args.participants.split(",")
+                              if p.strip()}
 
-    print(f"Trial:        {args.stem}")
-    print(f"Pen CSV:      {paths['pen_path']}")
-    print(f"Synced BORIS: {paths['boris_path']}")
-    print(f"Output:       {paths['output_path']}")
+    batch_mode = args.batch or participant_filter is not None
+
+    # ---- single-trial mode --------------------------------------------- #
+    if not batch_mode:
+        if not args.stem:
+            sys.exit("ERROR: provide a trial stem, or use --batch / "
+                     "--participants for a batch run.")
+        status = run_one(
+            args.stem, args.landmarks_root, args.boris_root,
+            args.calib_prefix, args.max_dt, args.recenter_xy,
+            args.outlier_factor, verbose=True)
+        if status["status"] != "ok":
+            sys.exit(f"\nERROR — {status['status']}:\n{status['error']}")
+        return
+
+    # ---- batch mode ----------------------------------------------------- #
+    trials = list(iter_trial_stems(args.landmarks_root, participant_filter))
+    if not trials:
+        which = (f"participants {', '.join(sorted(participant_filter))}"
+                 if participant_filter else "any participant")
+        sys.exit(f"No trial folders (with pen + boris_synced CSVs) found for "
+                 f"{which} under {args.landmarks_root}")
+
+    print(f"Found {len(trials)} trial(s) to process")
+    if participant_filter:
+        print(f"  (restricted to: {', '.join(sorted(participant_filter))})")
     print()
 
-    # ---- process -------------------------------------------------------- #
-    try:
-        res = process(
-            paths["pen_path"], paths["boris_path"], paths["output_path"],
-            calib_prefix  = args.calib_prefix,
-            max_dt        = args.max_dt,
-            recenter_xy   = args.recenter_xy,
-            outlier_factor= args.outlier_factor,
-        )
-    except RuntimeError as e:
-        sys.exit(f"ERROR — processing failed:\n{e}")
+    if args.dry_run:
+        print("DRY RUN - would process:")
+        for stem, pid in trials:
+            print(f"  [{pid}] {stem}")
+        return
 
-    # ---- console summary ------------------------------------------------ #
-    print(f"Calibration points ({res['n_calib']} used):")
-    for beh, idx, note, _ in sorted(res["calib_meta"],
-                                    key=lambda x: (x[0] or "")):
-        tag = "  [DROPPED]" if "DROPPED" in note else "  [used]  "
-        print(f"{tag} {beh:<12}  pen_row={str(idx):<6}  {note}")
+    results = []
+    for i, (stem, pid) in enumerate(trials, 1):
+        print(f"[{i}/{len(trials)}] {stem}")
+        status = run_one(
+            stem, args.landmarks_root, args.boris_root,
+            args.calib_prefix, args.max_dt, args.recenter_xy,
+            args.outlier_factor, verbose=False)
+        # One-line per-trial summary
+        if status["status"] == "ok":
+            drop = status.get("n_dropped", 0)
+            extra = f", {drop} dropped" if drop else ""
+            print(f"   ok — {status['n_calib']} calib points{extra}, "
+                  f"RMS {status['rms_z_mm']:.2f} mm")
+        else:
+            print(f"   {status['status']}: "
+                  f"{(status['error'] or '').splitlines()[0]}")
+        results.append(status)
 
+    # ---- summary -------------------------------------------------------- #
     print()
-    print(f"Plane normal:    [{res['normal'][0]:+.4f},  "
-          f"{res['normal'][1]:+.4f},  {res['normal'][2]:+.4f}]")
-    print(f"Plane centroid:  [{res['centroid'][0]:+.4f},  "
-          f"{res['centroid'][1]:+.4f},  {res['centroid'][2]:+.4f}]")
-    print(f"Fit quality  —   RMS: {res['rms_z']*1000:.2f} mm   "
-          f"max: {res['max_z']*1000:.2f} mm")
-    print(f"Pen rows written: {res['n_written']}")
-    print(f"Output:  {res['output_path']}")
+    print("=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    from collections import Counter
+    counts = Counter(r["status"] for r in results)
+    print(f"Total trials: {len(results)} | {dict(counts)}")
 
-    # ---- quality log ---------------------------------------------------- #
-    log_path = paths["log_path"]
-    write_quality_log(log_path, res, args.stem, paths["pid"],
-                      paths["pen_path"], paths["boris_path"])
-    print(f"Quality log: {log_path}")
+    oks = [r for r in results if r["status"] == "ok"]
+    if oks:
+        rms_vals = [r["rms_z_mm"] for r in oks]
+        print(f"Fit RMS across {len(oks)} successful trials: "
+              f"min {min(rms_vals):.2f}  max {max(rms_vals):.2f}  "
+              f"mean {sum(rms_vals)/len(rms_vals):.2f} mm")
+
+    problems = [r for r in results if r["status"] != "ok"]
+    if problems:
+        print()
+        print("Trials with issues:")
+        for r in problems:
+            first_line = (r["error"] or "").splitlines()[0] if r["error"] else ""
+            print(f"  [{r['status']}] {r['stem']}: {first_line}")
 
 
 if __name__ == "__main__":

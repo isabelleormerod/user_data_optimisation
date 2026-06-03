@@ -24,7 +24,7 @@ Usage:
     python batch_sync.py --json-folder /path/to/jsons --participants P003,P004
     # Skip the tracking sync and only convert BORIS files:
     python batch_sync.py --json-folder /path/to/jsons --boris-folder /path/to/boris --skip-sync
-    python batch_sync.py --json-folder /path/to/jsons --boris-folder /path/to/boris --participants 3 --skip-sync
+    python batch_sync.py --json-folder A:\Automated_chain_BETA\Participant_Landmarks --boris-folder A:\Automated_chain_BETA\BORIS_csvs --participants 3 --skip-sync
     # Note: participants may be numeric (e.g. '3') or full IDs (e.g. 'P003').
 """
 
