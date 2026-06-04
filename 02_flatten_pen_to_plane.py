@@ -20,19 +20,19 @@ Default root (edit to match your machine, then you never need to pass it):
     LANDMARKS_ROOT = A:/Automated_chain_BETA/Participant_Landmarks
 
 Usage:
-    python flatten_pen_to_plane.py P003_Long_Large_Front_weighted_A180
+    python 02_flatten_pen_to_plane.py P003_Long_Large_Front_weighted_A180
     python flatten_pen_to_plane.py P003_Long_Large_Front_weighted_A180 \\
         --landmarks-root "D:/MyData/Participant_Landmarks"
 
 Per-participant usage (process all trials for one or more participants):
     # Process all trials for a single participant P003
-    python flatten_pen_to_plane.py --participants P003
+    python 02_flatten_pen_to_plane.py --participants P003
 
     # Process multiple participants (comma-separated)
-    python flatten_pen_to_plane.py --participants P003,P004
+    python 02_flatten_pen_to_plane.py --participants P003,P004
 
     # Dry-run to list which trials would be processed for participant P003
-    python flatten_pen_to_plane.py --participants P003 --dry-run
+    python 02_flatten_pen_to_plane.py --participants P003 --dry-run
 """
 
 import argparse
@@ -331,18 +331,30 @@ def process(pen_path: Path, boris_path: Path, output_path: Path,
     calib_t_set = set(np.round(calib_t, 6).tolist())
     flat_all    = (R @ xyz_arr.T).T + t_vec
 
+    # Carry the pen quaternion through if the input has it, so the flattened
+    # file is self-contained (quaternion + flattened coords in one place).
+    quat_cols = ["qw", "qx", "qy", "qz"]
+    has_quat = all(qc in pen_rows[0] for qc in quat_cols) if pen_rows else False
+
     with output_path.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["t_s", "x", "y", "z",
-                    "x_flat", "y_flat", "z_flat",
-                    "data_quality", "is_calibration"])
+        header = ["t_s"]
+        if has_quat:
+            header += quat_cols
+        header += ["x", "y", "z",
+                   "x_flat", "y_flat", "z_flat",
+                   "data_quality", "is_calibration"]
+        w.writerow(header)
         for i, row in enumerate(pen_rows):
             p, pf = xyz_arr[i], flat_all[i]
             is_cal = 1 if round(float(t_s_arr[i]), 6) in calib_t_set else 0
-            w.writerow([f"{t_s_arr[i]:.4f}",
-                        f"{p[0]:.6f}",  f"{p[1]:.6f}",  f"{p[2]:.6f}",
-                        f"{pf[0]:.6f}", f"{pf[1]:.6f}", f"{pf[2]:.6f}",
-                        row.get("data_quality", ""), is_cal])
+            out = [f"{t_s_arr[i]:.4f}"]
+            if has_quat:
+                out += [row.get(qc, "") for qc in quat_cols]
+            out += [f"{p[0]:.6f}",  f"{p[1]:.6f}",  f"{p[2]:.6f}",
+                    f"{pf[0]:.6f}", f"{pf[1]:.6f}", f"{pf[2]:.6f}",
+                    row.get("data_quality", ""), is_cal]
+            w.writerow(out)
 
     return {
         "output_path": output_path,
@@ -350,6 +362,12 @@ def process(pen_path: Path, boris_path: Path, output_path: Path,
         "calib_meta":  calib_meta,
         "centroid":    centroid,
         "normal":      normal,
+        # Plane-frame axes in world coords (rows of R): u=flattened-x (L/R),
+        # v=flattened-y (up/down), n=flattened-z (normal).
+        "axis_u":      R[0].copy(),
+        "axis_v":      R[1].copy(),
+        "axis_n":      R[2].copy(),
+        "plane_d":     float(-np.dot(R[2], centroid)),  # n.p + d = 0
         "rms_z":       rms_z,
         "max_z":       max_z,
         "n_written":   len(pen_rows),
@@ -366,6 +384,10 @@ _LOG_FIELDS = [
     "rms_z_mm", "max_z_mm",
     "normal_x", "normal_y", "normal_z",
     "centroid_x", "centroid_y", "centroid_z",
+    "plane_d",
+    "axis_u_x", "axis_u_y", "axis_u_z",
+    "axis_v_x", "axis_v_y", "axis_v_z",
+    "axis_n_x", "axis_n_y", "axis_n_z",
     "per_point_detail",
 ]
 
@@ -398,6 +420,16 @@ def write_quality_log(log_path: Path, res: dict, stem: str, pid: str,
         "centroid_x":      f"{res['centroid'][0]:+.6f}",
         "centroid_y":      f"{res['centroid'][1]:+.6f}",
         "centroid_z":      f"{res['centroid'][2]:+.6f}",
+        "plane_d":         f"{res['plane_d']:+.6f}",
+        "axis_u_x":        f"{res['axis_u'][0]:+.6f}",
+        "axis_u_y":        f"{res['axis_u'][1]:+.6f}",
+        "axis_u_z":        f"{res['axis_u'][2]:+.6f}",
+        "axis_v_x":        f"{res['axis_v'][0]:+.6f}",
+        "axis_v_y":        f"{res['axis_v'][1]:+.6f}",
+        "axis_v_z":        f"{res['axis_v'][2]:+.6f}",
+        "axis_n_x":        f"{res['axis_n'][0]:+.6f}",
+        "axis_n_y":        f"{res['axis_n'][1]:+.6f}",
+        "axis_n_z":        f"{res['axis_n'][2]:+.6f}",
         "per_point_detail": per_point,
     }
     write_header = not log_path.exists()

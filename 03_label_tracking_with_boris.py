@@ -35,7 +35,7 @@ Per-participant usage (process all trials for one or more participants):
     python label_tracking_with_boris.py A:\Automated_chain_BETA\Participant_Landmarks --participants P003
 s
     # Process multiple participants (comma-separated)
-    python label_tracking_with_boris.py A:\Automated_chain_BETA\Participant_Landmarks --participants P003,P004
+    python 03_label_tracking_with_boris.py A:\Automated_chain_BETA\Participant_Landmarks --participants P003,P004
 """
 
 import argparse
@@ -207,7 +207,7 @@ def write_csv(path: Path, rows, fields):
 def find_files(trial_folder: Path):
     """Locate the boris_synced CSV and the three tracking CSVs by suffix."""
     boris = list(trial_folder.glob("*_boris_synced.csv"))
-    pen = list(trial_folder.glob("*_pen.csv"))
+    pen = list(trial_folder.glob("*_pen_flattened.csv"))
     body = list(trial_folder.glob("*_body.csv"))
     hand = list(trial_folder.glob("*_hand.csv"))
     # Exclude already-labelled files
