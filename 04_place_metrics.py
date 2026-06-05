@@ -45,6 +45,10 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+
+from utils.io import parse_float, read_table
+from utils.discovery import find_labelled_pen, iter_trials_labelled
+from utils.params import parse_participant_filter
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -61,16 +65,6 @@ PEN_LOCAL_AXIS = np.array([0.0, 0.0, 1.0])   # local +Z = pen shaft (validated)
 # --------------------------------------------------------------------------- #
 # IO
 # --------------------------------------------------------------------------- #
-def read_table(path: Path):
-    """Delimiter detected from the header content (tab vs comma)."""
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        first = f.readline()
-    delim = "\t" if first.count("\t") >= first.count(",") and "\t" in first else ","
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f, delimiter=delim)
-        return list(reader), list(reader.fieldnames or [])
-
-
 def load_plane_log(log_path: Path) -> dict:
     """Map trial_stem -> dict with normal, centroid, and (if logged) the
     in-plane axes u/v and the normal axis n. If the axes aren't in the log
@@ -169,13 +163,6 @@ def best_shaft_axis(pen, place_mask, normal):
 # --------------------------------------------------------------------------- #
 # Place event extraction
 # --------------------------------------------------------------------------- #
-def parse_float(s):
-    try:
-        return float(s)
-    except (TypeError, ValueError):
-        return None
-
-
 def get_place_intervals(boris_rows):
     """Return list of (start_t_s, stop_t_s) for Place state events, paired in
     time order."""
@@ -294,22 +281,6 @@ def compute_place_metrics(pen, start, stop, normal, u, v):
 # --------------------------------------------------------------------------- #
 # Per-trial processing
 # --------------------------------------------------------------------------- #
-def find_labelled_pen(trial_dir: Path, stem: str):
-    """Locate the labelled pen file. Prefers the flattened+labelled file
-    (has quaternion + flattened coords + behaviour flags), then a plain
-    labelled pen file. Returns a Path or None."""
-    candidates = [
-        trial_dir / f"{stem}_pen_flattened_labelled.csv",
-        trial_dir / f"{stem}_pen_labelled.csv",
-    ]
-    for c in candidates:
-        if c.is_file():
-            return c
-    # Fall back to any *_pen*labelled*.csv in the folder
-    globbed = sorted(trial_dir.glob("*_pen*labelled*.csv"))
-    return globbed[0] if globbed else None
-
-
 def load_labelled(path: Path):
     """Read a labelled pen CSV. Returns (cols dict of arrays, behaviour_names).
     Requires t_s + quaternion + x,y,z. Behaviour columns are any extra 0/1
@@ -434,19 +405,6 @@ def process_trial(stem, pid, trial_dir, plane_log):
 # --------------------------------------------------------------------------- #
 # Discovery
 # --------------------------------------------------------------------------- #
-def iter_trials(root, participants=None):
-    for pid_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        pid = pid_dir.name
-        if pid == "metrics":
-            continue
-        if participants and pid not in participants:
-            continue
-        for trial_dir in sorted(t for t in pid_dir.iterdir() if t.is_dir()):
-            stem = trial_dir.name
-            if find_labelled_pen(trial_dir, stem) is not None:
-                yield stem, pid, trial_dir
-
-
 # --------------------------------------------------------------------------- #
 # CSV + graphs
 # --------------------------------------------------------------------------- #
@@ -572,15 +530,14 @@ def main():
     if not root.is_dir():
         sys.exit(f"ERROR: {root} is not a directory")
 
-    pfilter = ({p.strip() for p in args.participants.split(",") if p.strip()}
-               if args.participants else None)
+    pfilter = parse_participant_filter(args.participants)
 
     plane_log = load_plane_log(root / "plane_quality_log.csv")
     if not plane_log:
         print("WARNING: no plane_quality_log.csv found or it's empty. "
               "Run flatten_pen_to_plane.py first; metrics need the plane.")
 
-    trials = list(iter_trials(root, pfilter))
+    trials = list(iter_trials_labelled(root, pfilter))
     if not trials:
         sys.exit("No trial folders with a labelled pen file found.")
 

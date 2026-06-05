@@ -37,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import sync_to_pen_time  # noqa: E402
 import convert_boris_to_synced_time as convert_boris  # noqa: E402
+from utils.params import participant_of  # noqa: E402
 
 
 def json_stem(json_path: Path) -> str:
@@ -47,11 +48,6 @@ def json_stem(json_path: Path) -> str:
     if name.endswith(".json"):
         return name[:-len(".json")]
     return json_path.stem
-
-
-def participant_of(stem: str) -> str:
-    """First '_'-separated token of a stem, e.g. 'P003' from 'P003_Short_...'."""
-    return stem.split("_", 1)[0]
 
 
 def build_json_index(json_folder: Path) -> dict:

@@ -46,6 +46,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from utils.stats import fdr_bh, zscore
+from utils.params import parse_participant_filter
+
 try:
     import statsmodels.formula.api as smf
     HAVE_SM = True
@@ -70,35 +73,6 @@ NON_FEATURE |= set(PERF_METRICS)
 NON_FEATURE |= {m.replace("_mean_deg", "_var_deg2") for m in PERF_METRICS}
 NON_FEATURE |= {"perp_var_deg2", "leftright_var_deg2", "updown_var_deg2"}
 
-
-def fdr_bh(pvals):
-    """Benjamini-Hochberg FDR. Returns q-values aligned to input order."""
-    p = np.asarray(pvals, dtype=float)
-    ok = ~np.isnan(p)
-    q = np.full_like(p, np.nan)
-    idx = np.where(ok)[0]
-    if len(idx) == 0:
-        return q
-    ps = p[idx]
-    order = np.argsort(ps)
-    ranked = ps[order]
-    n = len(ranked)
-    qr = ranked * n / (np.arange(1, n + 1))
-    # enforce monotonicity
-    qr = np.minimum.accumulate(qr[::-1])[::-1]
-    qr = np.clip(qr, 0, 1)
-    qfull = np.empty(n)
-    qfull[order] = qr
-    q[idx] = qfull
-    return q
-
-
-def zscore(s):
-    s = pd.to_numeric(s, errors="coerce")
-    sd = s.std(ddof=0)
-    if sd == 0 or np.isnan(sd):
-        return None
-    return (s - s.mean()) / sd
 
 
 def detect_features(df):
@@ -252,8 +226,8 @@ def main():
         sys.exit("statsmodels is required:  pip install statsmodels")
 
     df = pd.read_csv(csv_path)
-    if args.participants:
-        keep = {p.strip() for p in args.participants.split(",") if p.strip()}
+    keep = parse_participant_filter(args.participants)
+    if keep:
         df = df[df["participant"].astype(str).isin(keep)].copy()
         if df.empty:
             sys.exit(f"No rows for participants {sorted(keep)}")

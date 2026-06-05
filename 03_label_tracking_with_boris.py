@@ -39,11 +39,14 @@ s
 """
 
 import argparse
-import csv
 import re
 import sys
 from bisect import bisect_left
 from pathlib import Path
+
+from utils.io import parse_float, read_table, write_table
+from utils.discovery import iter_trial_folders
+from utils.params import parse_participant_filter
 
 
 # ----------------------------------------------------------------------------
@@ -58,33 +61,6 @@ def sanitise(name: str) -> str:
     return s or "unnamed"
 
 
-def parse_float(s):
-    if s is None or s == "":
-        return None
-    try:
-        return float(s)
-    except (TypeError, ValueError):
-        return None
-
-
-def read_csv(path: Path):
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-        fields = list(reader.fieldnames or [])
-    return rows, fields
-
-
-def read_boris_synced(path: Path):
-    """Read the synced BORIS CSV (could be comma or tab delimited)."""
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        first = f.readline()
-        delim = "\t" if "\t" in first else ","
-        f.seek(0)
-        reader = csv.DictReader(f, delimiter=delim)
-        rows = list(reader)
-        fields = list(reader.fieldnames or [])
-    return rows, fields
 
 
 # ----------------------------------------------------------------------------
@@ -192,14 +168,6 @@ def label_tracking(rows, fields, intervals, points, point_window_s):
     return rows, new_fields, behaviours
 
 
-def write_csv(path: Path, rows, fields):
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        for r in rows:
-            writer.writerow(r)
-
-
 # ----------------------------------------------------------------------------
 # Process one trial folder
 # ----------------------------------------------------------------------------
@@ -234,7 +202,7 @@ def process_folder(trial_folder: Path, point_window_s: float) -> dict:
             f"Multiple boris_synced files found; using {found['boris'][0].name}")
     boris_path = found["boris"][0]
 
-    boris_rows, _ = read_boris_synced(boris_path)
+    boris_rows, _ = read_table(boris_path)
     intervals, points, warns = build_label_spec(boris_rows)
     result["warnings"].extend(warns)
     behaviours = sorted({b for b, _, _ in intervals} | {b for b, _ in points})
@@ -250,33 +218,16 @@ def process_folder(trial_folder: Path, point_window_s: float) -> dict:
             result["warnings"].append(f"No {stream} CSV found.")
             continue
         track_path = found[stream][0]
-        rows, fields = read_csv(track_path)
+        rows, fields = read_table(track_path)
         rows, new_fields, _ = label_tracking(
             rows, fields, intervals, points, point_window_s)
         out_path = track_path.with_name(f"{track_path.stem}_labelled.csv")
-        write_csv(out_path, rows, new_fields)
+        write_table(out_path, rows, new_fields)
         result["labelled"].append(out_path.name)
         any_done = True
 
     result["status"] = "ok" if any_done else "no_tracking_files"
     return result
-
-
-def iter_trial_folders(root: Path, participants: set = None):
-    """Yield trial folders under a Participant_Landmarks-style root:
-    <root>/<participant>/<trial>/. A trial folder is any dir containing a
-    *_boris_synced.csv. If `participants` is given (a set of PIDs), only those
-    participants are yielded.
-    """
-    if not root.is_dir():
-        return
-    for participant in sorted(p for p in root.iterdir() if p.is_dir()):
-        pid = participant.name
-        if participants is not None and pid not in participants:
-            continue
-        for trial in sorted(t for t in participant.iterdir() if t.is_dir()):
-            if list(trial.glob("*_boris_synced.csv")):
-                yield trial
 
 
 # ----------------------------------------------------------------------------
@@ -304,11 +255,7 @@ def main():
     if not args.path.exists():
         sys.exit(f"ERROR: {args.path} not found")
 
-    # Parse participant filter
-    participant_filter = None
-    if args.participants:
-        participant_filter = {p.strip() for p in args.participants.split(",")
-                              if p.strip()}
+    participant_filter = parse_participant_filter(args.participants)
 
     batch_mode = args.batch or (participant_filter is not None)
 

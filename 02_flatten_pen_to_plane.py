@@ -43,33 +43,16 @@ from pathlib import Path
 
 import numpy as np
 
+from utils.io import read_table
+from utils.discovery import iter_trial_stems
+from utils.params import parse_participant_filter
+
 # ------------------------------------------------------------------ #
 # *** EDIT THIS LINE TO MATCH YOUR MACHINE ***
 DEFAULT_LANDMARKS_ROOT = Path("A:/Automated_chain_BETA/Participant_Landmarks")
 # Kept for CLI backwards-compatibility; no longer used for resolution.
 DEFAULT_BORIS_ROOT     = Path("A:/Automated_chain_BETA/BORIS_csvs")
 # ------------------------------------------------------------------ #
-
-
-def iter_trial_stems(landmarks_root: Path, participants: set = None):
-    """Yield (stem, participant) for every trial folder under the root that
-    contains both a *_pen.csv and a *_boris_synced.csv.
-
-    Layout: <root>/<PID>/<stem>/<stem>_pen.csv etc.
-    If `participants` is given (a set of PIDs), only those are yielded.
-    """
-    if not landmarks_root.is_dir():
-        return
-    for pid_dir in sorted(p for p in landmarks_root.iterdir() if p.is_dir()):
-        pid = pid_dir.name
-        if participants is not None and pid not in participants:
-            continue
-        for trial_dir in sorted(t for t in pid_dir.iterdir() if t.is_dir()):
-            stem = trial_dir.name
-            pen = trial_dir / f"{stem}_pen.csv"
-            boris = trial_dir / f"{stem}_boris_synced.csv"
-            if pen.is_file() and boris.is_file():
-                yield stem, pid
 
 
 # --------------------------------------------------------------------------- #
@@ -134,30 +117,6 @@ def resolve_paths(stem: str,
 # --------------------------------------------------------------------------- #
 # I/O helpers
 # --------------------------------------------------------------------------- #
-def read_table(path: Path):
-    """Read a delimited table, detecting tab vs comma from the actual content
-    (not the file extension). The synced BORIS file keeps the delimiter of its
-    source, so a .csv may in fact be tab-delimited."""
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        first_line = f.readline()
-    # Decide delimiter from the header line: prefer whichever splits it into
-    # more fields. Tab wins ties because BORIS exports are usually TSV.
-    n_tab = first_line.count("\t")
-    n_comma = first_line.count(",")
-    if n_tab >= n_comma and n_tab > 0:
-        delim = "\t"
-    elif n_comma > 0:
-        delim = ","
-    else:
-        # Single-column or unknown; fall back to extension then comma
-        delim = "\t" if path.suffix.lower() == ".tsv" else ","
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f, delimiter=delim)
-        rows = list(reader)
-        fieldnames = list(reader.fieldnames or [])
-    return rows, fieldnames
-
-
 def load_pen(path: Path):
     rows, fields = read_table(path)
     for col in ("t_s", "x", "y", "z"):
@@ -562,11 +521,7 @@ def main():
 
     args = ap.parse_args()
 
-    # Parse participant filter
-    participant_filter = None
-    if args.participants:
-        participant_filter = {p.strip() for p in args.participants.split(",")
-                              if p.strip()}
+    participant_filter = parse_participant_filter(args.participants)
 
     batch_mode = args.batch or participant_filter is not None
 

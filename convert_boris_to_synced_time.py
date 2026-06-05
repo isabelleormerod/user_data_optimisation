@@ -23,10 +23,12 @@ Usage:
 
 import argparse
 import csv
-import json
 import re
 import sys
 from pathlib import PurePosixPath, PureWindowsPath, Path
+
+from utils.io import load_json
+from utils.params import strip_timestamp_suffix
 
 
 # Video filename suffixes to strip to recover the JSON stem
@@ -106,11 +108,6 @@ def get_boris_media_stem(boris_path: Path) -> str:
     return json_stem_from_video(video_fn)
 
 
-def load_json(path: Path) -> dict:
-    with path.open("r", encoding="utf-8-sig") as f:
-        return json.load(f)
-
-
 def get_pen_samples(data: dict) -> list:
     """Return list of pen sample timestamps in UTC ms (index = pen sample index)."""
     frames = data.get("penTracking", {}).get("frames", []) or []
@@ -182,14 +179,6 @@ def convert_frame_to_t_s(frame_idx: int, pen_timestamps: list,
     t_s = (utc - body_first_utc_ms) / 1000.0
     quality = "before_body" if t_s < 0 else "ok"
     return (t_s, quality)
-
-
-_TIMESTAMP_SUFFIX_RE = re.compile(r'_\d{8}_\d{6}$')
-
-
-def strip_timestamp_suffix(stem: str) -> str:
-    """Strip a trailing YYYYMMDD_HHMMSS timestamp from a stem."""
-    return _TIMESTAMP_SUFFIX_RE.sub("", stem)
 
 
 def video_stem_folder(json_path: Path) -> tuple:

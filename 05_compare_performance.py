@@ -45,6 +45,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy import stats
 
+from utils.params import parse_params
+
 
 METRICS = [
     ("duration_s", "Duration", "s"),
@@ -64,49 +66,6 @@ ALL_FACTORS = ["participant", "height"] + PARAM_FACTORS
 # --------------------------------------------------------------------------- #
 # Parameter parsing
 # --------------------------------------------------------------------------- #
-def parse_params(trial: str) -> dict:
-    """Parse trial parameters by matching known values.
-
-    Known vocabularies:
-        Length : Long | Short
-        Size   : Large | Small
-        Weight : Front_weighted | Not_weighted
-        Angle  : A<digits>  (stored as int)
-
-    Note: the weight descriptor is two tokens ('Front_weighted' or
-    'Not_weighted'); 'Front' is part of the weight, NOT a separate position
-    factor. Returns a dict; fields not found are None.
-    """
-    out = {k: None for k in PARAM_FACTORS}
-    tokens = trial.split("_")
-    joined = "_".join(tokens)
-
-    # Weight: match the two-token descriptors
-    if "Not_weighted" in joined:
-        out["Weight"] = "Not_weighted"
-    elif "Front_weighted" in joined:
-        out["Weight"] = "Front_weighted"
-
-    # Angle: token like A135
-    for tok in tokens:
-        if tok and tok[0].upper() == "A" and tok[1:].isdigit():
-            out["Angle"] = int(tok[1:])
-            break
-
-    # Categorical fields matched against their known vocabularies
-    vocab = {
-        "Length": {"Long", "Short"},
-        "Size":   {"Large", "Small"},
-    }
-    for field, allowed in vocab.items():
-        for tok in tokens:
-            if tok in allowed:
-                out[field] = tok
-                break
-
-    return out
-
-
 def add_parameter_columns(df: pd.DataFrame) -> pd.DataFrame:
     parsed = df["trial"].apply(parse_params).apply(pd.Series)
     for c in PARAM_FACTORS:

@@ -41,20 +41,12 @@ Usage:
 
 import argparse
 import csv
-import json
-import re
 import sys
 from bisect import bisect_left
 from pathlib import Path
 
-
-# ----------------------------------------------------------------------------
-# Loading
-# ----------------------------------------------------------------------------
-
-def load_json(path: Path) -> dict:
-    with path.open("r", encoding="utf-8-sig") as f:
-        return json.load(f)
+from utils.io import load_json
+from utils.params import strip_timestamp_suffix
 
 
 # ----------------------------------------------------------------------------
@@ -248,14 +240,6 @@ def write_csv(path: Path, rows: list) -> None:
 # ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
-
-_TIMESTAMP_SUFFIX_RE = re.compile(r'_\d{8}_\d{6}$')
-
-
-def strip_timestamp_suffix(stem: str) -> str:
-    """Strip a trailing YYYYMMDD_HHMMSS timestamp from a stem."""
-    return _TIMESTAMP_SUFFIX_RE.sub("", stem)
-
 
 def resolve_output(json_path: Path) -> tuple:
     """Determine the per-trial output folder and file stem.

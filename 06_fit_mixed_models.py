@@ -39,10 +39,12 @@ Design Notes:
 import argparse
 import sys
 from pathlib import Path
-import re
 
 import numpy as np
 import pandas as pd
+
+from utils.params import parse_params
+from utils.stats import tidy_term_name
 
 try:
     import statsmodels.formula.api as smf
@@ -71,25 +73,6 @@ REFERENCE = {
 # --------------------------------------------------------------------------- #
 # Parameter parsing
 # --------------------------------------------------------------------------- #
-def parse_params(trial: str) -> dict:
-    out = {"Length": None, "Size": None, "Weight": None, "Angle": None}
-    tokens = trial.split("_")
-    joined = "_".join(tokens)
-    if "Not_weighted" in joined:
-        out["Weight"] = "Not_weighted"
-    elif "Front_weighted" in joined:
-        out["Weight"] = "Front_weighted"
-    for tok in tokens:
-        if tok and tok.upper() == "A" and tok[1:].isdigit():
-            out["Angle"] = int(tok[1:])
-            break
-    for tok in tokens:
-        if tok in ("Long", "Short"):
-            out["Length"] = tok
-        elif tok in ("Large", "Small"):
-            out["Size"] = tok
-    return out
-
 # --------------------------------------------------------------------------- #
 # Load + aggregate
 # --------------------------------------------------------------------------- #
@@ -162,13 +145,6 @@ def build_formula(metric: str, df: pd.DataFrame):
         return f"{metric} ~ {height_term}"
         
     return None
-
-def tidy_term_name(name: str) -> str:
-    """Clean up statsmodels' verbose categorical interaction term names."""
-    # Converts "C(Weight, Treatment(...))[T.Front_weighted]:C(height...)[T.High]"
-    # into "Weight[Front_weighted]:height[High]"
-    clean = re.sub(r"C\(([a-zA-Z0-9_]+)[^\)]*\)\[T\.([^\]]+)\]", r"\1[\2]", name)
-    return clean
 
 def fit_metric(metric: str, df: pd.DataFrame):
     """Fit one random-intercept model."""
