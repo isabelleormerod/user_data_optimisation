@@ -36,7 +36,7 @@ Outputs (under <root>/metrics/ranking/):
     sensitivity_summary.txt              human-readable interpretation
 
 Usage:
-    python 11_rank_prototypes.py --landmarks-root "A:/.../Participant_Landmarks"
+    python 11_rank_prototypes.py --landmarks-root "A:/Automated_chain_BETA/Participant_Landmarks"
     python 11_rank_prototypes.py --landmarks-root ... \\
         --custom-weights 1 1 1 2 1 1 3 2 1 1 1 1
     python 11_rank_prototypes.py --landmarks-root ... --reba-side left
@@ -118,52 +118,55 @@ def eta2_weights_from_screening(metrics_dir: Path,
                                 cost_metrics: list) -> dict:
     """
     For each cost metric, compute its mean eta-squared across the prototype
-    factors (Length/Size/Weight/Angle), reading from the 05 comparison output.
-    Returns a dict {metric: raw_eta2_mean}.
+    factors (Length/Size/Weight/Angle).
 
-    If the 05 output isn't available, falls back to computing eta2 directly
-    from the combined data, or equal weights.
+    Reads from TWO sources:
+      - metrics/comparison/group_summary.csv        (performance metrics, from 05)
+      - metrics/posture_comparison/group_summary.csv (posture metrics, from 08)
+
+    Falls back to computing eta2 directly from combined_all.csv if neither
+    source is available for a given metric.
     """
-    # Try performance screening (05): group_summary has factor/metric/mean/sd/n
-    # We need eta2 from stat_tests or we recompute from group_summary.
-    stat_path = metrics_dir / "comparison" / "stat_tests.csv"
-    weights = {}
-    if stat_path.is_file():
-        st = pd.read_csv(stat_path)
-        # stat_tests doesn't have eta2 directly, but we can recompute it from
-        # group_summary (between-group SS / total SS approximated from means/sds/n)
-        gs_path = metrics_dir / "comparison" / "group_summary.csv"
-        if gs_path.is_file():
-            gs = pd.read_csv(gs_path)
-            for metric in cost_metrics:
-                eta2s = []
-                for fac in PROTO_FACTORS:
-                    sub = gs[(gs["factor"] == fac) & (gs["metric"] == metric)]
-                    if len(sub) < 2:
-                        continue
-                    # Approx eta2: between-group variance / total variance
-                    # Using weighted means and SDs to estimate SS
-                    ns = sub["n"].values.astype(float)
-                    means = sub["mean"].values.astype(float)
-                    sds = sub["sd"].values.astype(float)
-                    grand = np.average(means, weights=ns)
-                    ss_b = np.sum(ns * (means - grand) ** 2)
-                    ss_w = np.sum((ns - 1) * sds ** 2)
-                    ss_t = ss_b + ss_w
-                    if ss_t > 0:
-                        eta2s.append(ss_b / ss_t)
-                weights[metric] = float(np.mean(eta2s)) if eta2s else 0.0
-        return weights
+    def eta2_from_gs(gs: pd.DataFrame, metric: str) -> float:
+        """Compute mean eta2 across prototype factors from a group_summary table."""
+        eta2s = []
+        for fac in PROTO_FACTORS:
+            sub = gs[(gs["factor"] == fac) & (gs["metric"] == metric)]
+            if len(sub) < 2:
+                continue
+            ns    = sub["n"].values.astype(float)
+            means = sub["mean"].values.astype(float)
+            sds   = sub["sd"].values.astype(float)
+            grand = np.average(means, weights=ns)
+            ss_b  = np.sum(ns * (means - grand) ** 2)
+            ss_w  = np.sum((ns - 1) * sds ** 2)
+            ss_t  = ss_b + ss_w
+            if ss_t > 0:
+                eta2s.append(ss_b / ss_t)
+        return float(np.mean(eta2s)) if eta2s else 0.0
 
-    # Try posture screening (08): posture_eta_squared.csv
-    posture_eta_path = metrics_dir / "screening" / "posture_eta_squared.csv"
-    if posture_eta_path.is_file():
-        pe = pd.read_csv(posture_eta_path)
-        for metric in cost_metrics:
-            sub = pe[(pe["feature"] == metric) &
-                     (pe["factor"].isin(PROTO_FACTORS))]
-            if len(sub):
-                weights[metric] = float(sub["eta_squared"].mean())
+    # Load both group_summary files where available
+    perf_gs    = None
+    posture_gs = None
+
+    perf_path    = metrics_dir / "comparison" / "group_summary.csv"
+    posture_path = metrics_dir / "posture_comparison" / "group_summary.csv"
+
+    if perf_path.is_file():
+        perf_gs = pd.read_csv(perf_path)
+    if posture_path.is_file():
+        posture_gs = pd.read_csv(posture_path)
+
+    weights = {}
+    for metric in cost_metrics:
+        # Try performance table first, then posture table
+        val = None
+        if perf_gs is not None and metric in perf_gs["metric"].values:
+            val = eta2_from_gs(perf_gs, metric)
+        elif posture_gs is not None and metric in posture_gs["metric"].values:
+            val = eta2_from_gs(posture_gs, metric)
+        if val is not None:
+            weights[metric] = val
 
     return weights
 

@@ -6,8 +6,7 @@ Usage examples:
     python animate_pen.py --csv "A:\\Automated_chain_BETA\\Participant_Landmarks\\P007\\P007_Long_Large_Front_weighted_A135\\P007_Long_Large_Front_weighted_A135_pen_flattened_labelled.csv" \
         --output P007_Pen_Metrics.mp4 --fps 30 --duration 5
 
-    python animate_pen.py --root "A:\\Automated_chain_BETA\\Participant_Landmarks" \
-        --participant P007 --trial P007_Long_Large_Front_weighted_A135 --duration 5
+    python animate_pen.py --root "A:\\Automated_chain_BETA\\Participant_Landmarks" --participant P007 --trial P007_Long_Large_Front_weighted_A135 --duration 5
 
     python animate_pen.py --csv path/to/_pen_flattened_labelled.csv
 

@@ -13,8 +13,27 @@ def parse_float(s):
 
 
 def load_json(path: Path) -> dict:
-    with path.open("r", encoding="utf-8-sig") as f:
-        return json.load(f)
+    with open(path, "rb") as f:
+        # Skip leading null bytes (OS pre-allocation artefact)
+        chunk_size = 65536
+        offset = 0
+        start = None
+        while start is None:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                raise ValueError(f"{path.name}: file contains only null bytes")
+            i = next((i for i, b in enumerate(chunk) if b != 0), None)
+            if i is not None:
+                start = offset + i
+            offset += len(chunk)
+        f.seek(start)
+        raw = f.read()
+
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = raw.decode("utf-16")
+    else:
+        text = raw.decode("utf-8-sig")
+    return json.loads(text)
 
 
 def read_table(path: Path) -> tuple:
