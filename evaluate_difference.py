@@ -6,6 +6,28 @@ A unified master script for Ergonomic Posture Extraction and Statistical Compari
 Combines pen performance metrics and streamlined posture/hand metrics (REBA, Preferred
 Grip Span Model, and SPARC movement smoothness) into a single analytical pipeline.
 
+STATISTICAL ENGINE (mixed-effects, MAIN EFFECTS ONLY):
+  Within each height stratum, for every metric, ONE mixed model is fit with all
+  four prototype factors and a participant random intercept:
+
+      metric ~ C(Length) + C(Size) + C(Weight) + C(Angle) + (1 | participant)
+
+  Each factor gets a Wald test read off that single fit (via patsy's per-term
+  coefficient slices). This deliberately does NOT include interaction terms --
+  an earlier version added all pairwise interactions, but that made several
+  models (especially the coarser REBA/grip metrics) singular or unstable, which
+  is not worth the opacity it introduces. Main-effects-only mixed models are the
+  simple, robust, trustworthy baseline: they fit cleanly on this design and
+  directly answer "does this factor affect this metric, within this height,
+  once we account for repeated Place events per participant." A pooled model
+  per metric (across all heights, height added as a fifth factor) is also fit.
+
+  Why mixed effects at all: multiple Place events per participant are not
+  independent (same person, same trial); a random intercept for participant
+  models that dependence, avoiding the pseudoreplication of treating every
+  Place event as an independent sample (which a plain Mann-Whitney/Kruskal-Wallis
+  screen over raw events would do).
+
 MODES OF OPERATION:
   1. Compare Only (Default):
      python evaluate_difference.py --mode compare --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
@@ -21,14 +43,15 @@ MODES OF OPERATION:
      --posture-csv path/to/posture.csv         (Override default posture features path)
      --participants P001,P002                  (Filter by specific participant IDs)
      --no-graphs                               (Skip generating box plots)
-     --no-stratify                             (Skip height-stratified tests)
+     --no-stratify                             (Skip height-stratified mixed models)
      --stratify-by height                      (Column to stratify by, default: height)
+     --min-n 8                                 (Min rows required to attempt a model fit)
 """
 
 import argparse
-import csv
+import re
 import sys
-from collections import defaultdict
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +61,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy import stats
 from scipy.fft import rfft, rfftfreq
+
+warnings.simplefilter("ignore")
+import statsmodels.formula.api as smf
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
 
 # Restore native discovery modules to ensure labelled files are found accurately
 try:
@@ -196,7 +223,7 @@ def quat_angular_distance(q1, q2):
 def extract_posture_features(root_dir: Path, participants_str: str = None):
     """Reads raw trial CSVs via native discovery and extracts REBA, Preferred Grip Span, and SPARC metrics."""
     print(f"\n{'='*65}\nSTARTING POSTURE & HAND FEATURE EXTRACTION\n{'='*65}")
-    
+
     pfilter = parse_participant_filter(participants_str)
     trials = list(iter_trials_labelled(root_dir, pfilter))
 
@@ -231,7 +258,7 @@ def extract_posture_features(root_dir: Path, participants_str: str = None):
                 in_run = False; places.append((start, prev_t))
             prev_t = t
         if in_run: places.append((start, prev_t))
-        
+
         if not places:
             print(f"  [WARN] {stem}: 0 Place events identified in pen file.")
             continue
@@ -306,10 +333,10 @@ def extract_posture_features(root_dir: Path, participants_str: str = None):
 
                     ls, rs, lh, rh = get_j("LeftShoulder"), get_j("RightShoulder"), get_j("LeftHip"), get_j("RightHip")
                     le, re = get_j("LeftEar"), get_j("RightEar")
-                    
+
                     trunk_flex = angle_between((ls + rs)/2 - (lh + rh)/2, BODY_UP) if ls is not None and lh is not None else np.nan
                     neck_flex  = angle_between((le + re)/2 - (ls + rs)/2, BODY_UP) - trunk_flex if le is not None and ls is not None else np.nan
-                    
+
                     row["trunk_flex_mean"] = trunk_flex
                     row["neck_flex_mean"]  = neck_flex
 
@@ -326,7 +353,7 @@ def extract_posture_features(root_dir: Path, participants_str: str = None):
                             row["wrist_elevation_m_mean"] = float(np.dot(sh - wr, BODY_UP))
                             arm_len = np.linalg.norm(el - sh) + np.linalg.norm(wr - el) if el is not None else np.nan
                             row["reach_ratio_mean"] = float(np.linalg.norm(wr - sh) / arm_len) if arm_len > 1e-6 else np.nan
-                        
+
                         if sh is not None and el is not None:
                             uf = angle_between(el - sh, -(((ls + rs)/2 - (lh + rh)/2) if ls is not None else BODY_UP))
                             ef = angle_between(sh - el, wr - el) if wr is not None else 90.0
@@ -353,6 +380,8 @@ def extract_posture_features(root_dir: Path, participants_str: str = None):
 
 # =========================================================================== #
 # SECTION 4: STATISTICAL COMPARISON & PLOTTING (`--mode compare`)
+#   Mixed-effects models, MAIN EFFECTS ONLY (see module docstring for why the
+#   interaction-term version was dropped in favour of this simpler, robust one).
 # =========================================================================== #
 
 def parse_params(trial: str) -> dict:
@@ -383,6 +412,8 @@ def available_metrics(df: pd.DataFrame) -> list:
     return out
 
 def group_summary(df: pd.DataFrame, metrics: list, stratum_col: str = None) -> pd.DataFrame:
+    """Descriptive means/SDs per factor level -- purely descriptive, independent
+    of which statistical test is used, so kept as-is."""
     records = []
     groups = df.groupby(stratum_col, dropna=True) if stratum_col else [("All", df)]
     for stratum, sub_df in groups:
@@ -399,37 +430,128 @@ def group_summary(df: pd.DataFrame, metrics: list, stratum_col: str = None) -> p
                     records.append(rec)
     return pd.DataFrame(records)
 
-def stat_tests(df: pd.DataFrame, metrics: list, stratum_col: str = None) -> pd.DataFrame:
+
+# --------------------------------------------------------------------------- #
+# Mixed-model engine (main effects only)
+# --------------------------------------------------------------------------- #
+def _fit_mixed_main(data: pd.DataFrame, response: str, factors: list):
+    """Fit response ~ C(f1) + C(f2) + ... + (1|participant), main effects only.
+    Tries a few optimisers; ConvergenceWarnings suppressed locally (robust even
+    if something else in the environment has reset the global warning filters).
+    Returns (result or None, factors actually used, failure reason or None)."""
+    present = [f for f in factors if data[f].nunique() >= 2]
+    if not present:
+        return None, present, "no factor has >=2 levels in this subset"
+    formula = f"{response} ~ " + " + ".join(f"C({f})" for f in present)
+    last_err = None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ConvergenceWarning)
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for method in ("lbfgs", "powell", "cg"):
+            try:
+                res = smf.mixedlm(formula, data, groups=data["participant"]).fit(reml=False, method=method)
+                if np.isfinite(res.llf):
+                    return res, present, None
+                last_err = f"non-finite log-likelihood ({method})"
+            except Exception as ex:
+                last_err = f"{type(ex).__name__}: {ex}"
+    return None, present, (last_err or "unknown fit failure")
+
+
+def _term_wald(res, factor: str):
+    """Joint Wald p-value for one factor's coefficient(s) (tests all levels of
+    that factor simultaneously -- used for significance screening)."""
+    names = [n for n in res.fe_params.index if n.startswith(f"C({factor})")]
+    if not names:
+        return np.nan, np.nan
+    b = res.fe_params[names].values
+    try:
+        V = res.cov_params().loc[names, names].values
+        W = float(b @ np.linalg.solve(V, b))
+    except Exception:
+        return np.nan, len(names)
+    p = float(stats.chi2.sf(W, len(names)))
+    return p, len(names)
+
+
+def _term_level_effects(res, factor: str):
+    """Per-LEVEL signed coefficients for one factor, each relative to the
+    reference level. Necessary for multi-level factors (e.g. Angle, 3 levels ->
+    2 coefficients): collapsing to a single 'largest effect' loses which level
+    that was and discards the other contrast, which makes it impossible to
+    later determine which specific level is preferable. Returns a list of
+    dicts: [{level, effect, se}, ...], one per non-reference level.
+    Coefficient names from patsy look like 'C(Angle)[T.135]' or
+    'C(Angle)[T.135.0]' (float-coded) -- the level label is parsed out of the
+    '[T. ... ]' bracket."""
+    names = [n for n in res.fe_params.index if n.startswith(f"C({factor})")]
+    out = []
+    for n in names:
+        m = re.search(r"\[T\.(.+?)\]", n)
+        level_raw = m.group(1) if m else n
+        # tidy up float-coded labels like "135.0" -> "135"
+        try:
+            level_raw = str(int(float(level_raw)))
+        except ValueError:
+            pass
+        b = float(res.fe_params[n])
+        se = float(np.sqrt(res.cov_params().loc[n, n])) if n in res.cov_params().index else np.nan
+        out.append({"level": level_raw, "effect": b, "se": se})
+    return out
+
+
+def mixed_tests(df: pd.DataFrame, metrics: list, factors: list,
+                stratum_col: str = None, min_n: int = 8, verbose: bool = True) -> pd.DataFrame:
+    """Tidy table: [stratum,] factor, level, metric, p_value (joint, per factor),
+    effect (signed, per LEVEL), se, n. One mixed model per (metric, stratum), all
+    factors as main effects; a joint Wald test per factor for significance
+    screening, PLUS one row per individual level so the sign and magnitude of
+    every level's own contrast is preserved (needed for multi-level factors like
+    Angle -- see _term_level_effects). Binary factors get exactly one level row;
+    Angle gets two. Prints a fit-diagnostic per model."""
     records = []
+    diag = {"fit": 0, "skip": 0, "fail": 0}
     groups = df.groupby(stratum_col, dropna=True) if stratum_col else [("All", df)]
     for stratum, sub_df in groups:
-        for factor in PARAM_FACTORS if stratum_col else ALL_FACTORS:
-            if factor not in sub_df.columns: continue
-            for col, label, unit in metrics:
-                grps, levels = [], []
-                for level, grp in sub_df.groupby(factor, dropna=True):
-                    vals = pd.to_numeric(grp[col], errors="coerce").dropna().values
-                    if len(vals) >= 1: grps.append(vals); levels.append(str(level))
-                usable = [g for g in grps if len(g) >= 2]
-                if len(usable) < 2:
-                    rec = {"factor": factor, "metric": col, "metric_label": label, "test": "skipped",
-                           "statistic": np.nan, "p_value": np.nan, "n_groups": len(grps), "levels": ", ".join(levels)}
+        for col, label, unit in metrics:
+            d = sub_df.dropna(subset=[col, "participant"] + factors).copy().rename(columns={col: "_y"})
+            n_ppt = d["participant"].nunique()
+            tag = f"[{stratum}] {label}"
+            res, present, note = (None, [], None)
+            if n_ppt < 2 or len(d) < min_n:
+                diag["skip"] += 1
+                note = f"skipped: n={len(d)} rows, {n_ppt} participant(s) (need >=2 participants, >={min_n} rows)"
+                if verbose: print(f"    {tag}: {note}")
+            else:
+                res, present, note = _fit_mixed_main(d, "_y", factors)
+                if res is None:
+                    diag["fail"] += 1
+                    if verbose: print(f"    {tag}: fit failed: {note}  (n={len(d)}, {n_ppt} participants)")
                 else:
-                    try:
-                        if len(usable) == 2:
-                            stat, p = stats.mannwhitneyu(usable[0], usable[1], alternative="two-sided")
-                            test = "Mann-Whitney U"
-                        else:
-                            stat, p = stats.kruskal(*usable)
-                            test = "Kruskal-Wallis H"
-                    except ValueError as e:
-                        stat, p, test = np.nan, np.nan, f"error: {e}"
-                    rec = {"factor": factor, "metric": col, "metric_label": label, "test": test,
-                           "statistic": float(stat) if stat == stat else np.nan,
-                           "p_value": float(p) if p == p else np.nan, "n_groups": len(usable), "levels": ", ".join(levels)}
-                if stratum_col: rec["stratum"] = stratum; rec["n_events"] = len(sub_df)
-                records.append(rec)
+                    diag["fit"] += 1
+            for f in factors:
+                if res is not None:
+                    p, dfree = _term_wald(res, f)
+                    level_effects = _term_level_effects(res, f)
+                else:
+                    p, dfree, level_effects = np.nan, np.nan, []
+                if not level_effects:
+                    # no data / fit failed / factor absent -- still emit one placeholder row
+                    level_effects = [{"level": None, "effect": np.nan, "se": np.nan}]
+                for le in level_effects:
+                    rec = {"factor": f, "level": le["level"], "metric": col, "metric_label": label,
+                           "p_value": p, "df": dfree, "effect": le["effect"], "se": le["se"],
+                           "n": len(d), "n_participants": n_ppt,
+                           "fit_status": "ok" if res is not None else (note or "failed")}
+                    if stratum_col: rec["stratum"] = stratum
+                    records.append(rec)
+    if verbose:
+        total = sum(diag.values())
+        print(f"  Model fit summary: {diag['fit']}/{total} fitted OK, "
+              f"{diag['skip']}/{total} skipped (too little data), "
+              f"{diag['fail']}/{total} failed to converge in any optimiser.")
     return pd.DataFrame(records)
+
 
 def order_levels(factor, levels):
     orders = {"height": ["High", "Medium", "Low"], "Length": ["Short", "Long"],
@@ -461,8 +583,12 @@ def make_graphs(df, metrics, out_dir, p_lookup, stratum_col=None):
                     for i, vals in enumerate(data, 1):
                         jit = (np.random.rand(len(vals))-0.5)*0.15
                         ax.scatter(np.full(len(vals),i)+jit, vals, alpha=0.5, s=18, color="#1f77b4", zorder=3)
-                p = p_lookup.get((stratum, factor, col) if stratum else (factor, col))
-                title = f"{stratum}   (p={p:.3f})" if stratum and p==p else (f"{label} by {factor}   (p={p:.3f})" if p==p else f"{label} by {factor}")
+                p = p_lookup.get((stratum, factor, col) if stratum else (factor, col), np.nan)
+                has_p = p is not None and not pd.isna(p)
+                if stratum:
+                    title = f"{stratum}   (p={p:.3f})" if has_p else f"{stratum}"
+                else:
+                    title = f"{label} by {factor}   (p={p:.3f})" if has_p else f"{label} by {factor}"
                 ax.set_title(title, fontsize=10); ax.set_xlabel(factor); ax.grid(axis="y", alpha=0.3)
             axes[0].set_ylabel(f"{label} ({unit})")
             if stratum: fig.suptitle(f"{label} by {factor} — stratified by {stratum_col}", fontsize=11)
@@ -474,10 +600,10 @@ def make_graphs(df, metrics, out_dir, p_lookup, stratum_col=None):
 
 
 def compare_metrics(df_pen: pd.DataFrame, df_posture: pd.DataFrame, out_dir: Path, args):
-    """Merges datasets, runs omnibus stats, and outputs plots."""
-    print(f"\n{'='*65}\nSTARTING STATISTICAL COMPARISON & PLOTTING\n{'='*65}")
+    """Merges datasets, fits main-effects-only mixed models, outputs tables/plots."""
+    print(f"\n{'='*65}\nSTARTING STATISTICAL COMPARISON (mixed-effects, main effects only)\n{'='*65}")
     if not df_pen.empty and not df_posture.empty:
-        common_cols = [c for c in ["participant", "trial", "place_index", "height", "start_t_s", "stop_t_s"] 
+        common_cols = [c for c in ["participant", "trial", "place_index", "height", "start_t_s", "stop_t_s"]
                        if c in df_pen.columns and c in df_posture.columns]
         df = pd.merge(df_pen, df_posture, on=common_cols, how="outer")
         print(f"Merged Pen ({len(df_pen)} rows) and Posture ({len(df_posture)} rows) into {len(df)} Place events.")
@@ -494,12 +620,21 @@ def compare_metrics(df_pen: pd.DataFrame, df_posture: pd.DataFrame, out_dir: Pat
     metrics = available_metrics(df)
     print(f"Total Participants: {df['participant'].nunique()} | Trials: {df['trial'].nunique()}")
     print(f"Active metrics evaluated: {len(metrics)}")
-    
+
+    if "height" in df.columns:
+        counts = df["height"].fillna("<blank>").value_counts()
+        print("\nPlace events per height label:")
+        for h, n in counts.items():
+            flag = "  <-- not High/Medium/Low; could not match this event's timestamp to a labelled height window" \
+                  if h not in ("High", "Medium", "Low") else ""
+            print(f"  {h:>10}: {n}{flag}")
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Pooled Analysis
     group_summary(df, metrics).to_csv(out_dir / "group_summary.csv", index=False)
-    tests = stat_tests(df, metrics)
+    pooled_factors = PARAM_FACTORS + (["height"] if "height" in df.columns else [])
+    tests = mixed_tests(df, metrics, pooled_factors, min_n=args.min_n)
     tests.to_csv(out_dir / "stat_tests.csv", index=False)
     print(f"Wrote {out_dir / 'stat_tests.csv'} ({len(tests)} rows)")
 
@@ -507,7 +642,7 @@ def compare_metrics(df_pen: pd.DataFrame, df_posture: pd.DataFrame, out_dir: Pat
     if len(sig):
         print("\nPooled Significant Differences (p < 0.05):")
         for _, r in sig.sort_values("p_value").iterrows():
-            print(f"  {r['factor']:>12} -> {r['metric_label']:<35} {r['test']}  p={r['p_value']:.4f}")
+            print(f"  {r['factor']:>12} -> {r['metric_label']:<35} p={r['p_value']:.4f}")
 
     if not args.no_graphs:
         p_lookup = {(r["factor"], r["metric"]): r["p_value"] for _, r in tests.iterrows()}
@@ -518,20 +653,20 @@ def compare_metrics(df_pen: pd.DataFrame, df_posture: pd.DataFrame, out_dir: Pat
     if not args.no_stratify and sc in df.columns:
         strata = sorted(df[sc].dropna().unique(), key=lambda s: {"High":0,"Medium":1,"Low":2}.get(s, 9))
         print(f"\n{'='*65}\nSTRATIFIED ANALYSIS — prototype factors within each {sc}\n{'='*65}")
-        
-        strat_tests_df = stat_tests(df, metrics, stratum_col=sc)
+
+        strat_tests_df = mixed_tests(df, metrics, PARAM_FACTORS, stratum_col=sc, min_n=args.min_n)
         strat_tests_df.to_csv(out_dir / "stratified_stat_tests.csv", index=False)
         group_summary(df, metrics, stratum_col=sc).to_csv(out_dir / "stratified_summary.csv", index=False)
         print(f"Wrote {out_dir / 'stratified_stat_tests.csv'} ({len(strat_tests_df)} rows)")
         print(f"Wrote {out_dir / 'stratified_summary.csv'}\n")
 
         # --- FULL P-VALUE MATRIX OUTPUT ---
-        print(f"Full p-value matrix (prototype factors × metrics × stratum):")
-        
+        print(f"Full p-value matrix (prototype factors x metrics x stratum):")
+
         header_str = f"  {'Factor':<10} {'Metric':<35}"
         for s in strata: header_str += f" {s:>8}"
         print(header_str)
-        
+
         sep_str = f"  {'-'*10} {'-'*35}"
         for _ in strata: sep_str += f" {'-'*8}"
         print(sep_str)
@@ -546,30 +681,30 @@ def compare_metrics(df_pen: pd.DataFrame, df_posture: pd.DataFrame, out_dir: Pat
                         (strat_tests_df["factor"]  == factor) &
                         (strat_tests_df["metric"]  == col)
                     ]
-                    if match.empty:
+                    if match.empty or pd.isna(match.iloc[0]["p_value"]):
                         row_vals.append("     n/a")
                     else:
                         p = match.iloc[0]["p_value"]
-                        if p != p or np.isnan(p):
-                            row_vals.append("     n/a")
-                        else:
-                            has_data = True
-                            marker = "*" if p < 0.05 else " "
-                            row_vals.append(f"{p:>7.3f}{marker}")
-                
-                # Only print the row if at least one stratum had enough data to run a statistical test
+                        has_data = True
+                        marker = "*" if p < 0.05 else " "
+                        row_vals.append(f"{p:>7.3f}{marker}")
+
                 if has_data:
                     row_str = f"  {factor:<10} {label:<35}"
                     for v in row_vals: row_str += f" {v:>8}"
                     print(row_str)
-                    
-        print("\n  * = p < 0.05 (non-parametric omnibus test within stratum)")
+
+        print("\n  * = p < 0.05  (Wald test, mixed model, participant random intercept, main effects only)")
 
         if not args.no_graphs:
             sp_lookup = {(r["stratum"], r["factor"], r["metric"]): r["p_value"] for _, r in strat_tests_df.iterrows()}
             print(f"Wrote {len(make_graphs(df, metrics, out_dir, sp_lookup, stratum_col=sc))} stratified graph(s)")
 
     print(f"\nAll comparison outputs successfully generated in:\n  -> {out_dir}")
+    print("\nNote: mixed models use a participant random intercept (repeated Place events "
+          "per participant are not independent). p-values screen significance; the "
+          "'effect' column in the tidy CSVs gives magnitude and direction in the metric's "
+          "own units. No interaction terms are fit here -- see module docstring.")
 
 
 # =========================================================================== #
@@ -589,8 +724,9 @@ def main():
     ap.add_argument("--participants", type=str, default=None,
                     help="Comma-separated list of participant IDs to include")
     ap.add_argument("--no-graphs", action="store_true", help="Skip generating box plots")
-    ap.add_argument("--no-stratify", action="store_true", help="Skip height-stratified tests")
+    ap.add_argument("--no-stratify", action="store_true", help="Skip height-stratified mixed models")
     ap.add_argument("--stratify-by", default="height", help="Column to stratify by (default: height)")
+    ap.add_argument("--min-n", type=int, default=8, help="Min rows required to attempt a model fit")
     args = ap.parse_args()
 
     if not args.landmarks_root and not (args.pen_csv or args.posture_csv):
