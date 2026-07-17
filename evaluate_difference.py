@@ -285,10 +285,25 @@ def extract_posture_features(root_dir: Path, participants_str: str = None):
         df_body = pd.read_csv(body_path) if body_path.is_file() else pd.DataFrame()
         df_hand = pd.read_csv(hand_path) if hand_path.is_file() else pd.DataFrame()
 
-        for i, (s, e) in enumerate(places, 1):
+        # Compute each place event's height BEFORE assigning place_index, and
+        # number place_index WITHIN each height (resetting to 1 per height) --
+        # matching metrics.py's convention exactly (df.groupby("height").cumcount()+1).
+        # Previously this counted continuously across the WHOLE trial regardless
+        # of height, so pen and posture tables numbered the same physical place
+        # event differently unless that height happened to be first in the
+        # session's randomised order -- causing the pen/posture merge to
+        # silently mismatch or duplicate rows for any height tested 2nd or 3rd.
+        heights_for_places = [get_height((s + e) / 2) for s, e in places]
+        height_counters = {}
+        place_indices = []
+        for h in heights_for_places:
+            height_counters[h] = height_counters.get(h, 0) + 1
+            place_indices.append(height_counters[h])
+
+        for (i, (s, e)), height, place_idx in zip(enumerate(places, 1), heights_for_places, place_indices):
             dur = e - s
-            row = {"participant": pid, "trial": stem, "place_index": i,
-                   "height": get_height((s + e) / 2), "start_t_s": round(s, 4),
+            row = {"participant": pid, "trial": stem, "place_index": place_idx,
+                   "height": height, "start_t_s": round(s, 4),
                    "stop_t_s": round(e, 4), "duration_s": round(dur, 4)}
 
             # --- Hand Extraction (Grip Comfort & SPARC) ---
@@ -385,12 +400,17 @@ def extract_posture_features(root_dir: Path, participants_str: str = None):
 # =========================================================================== #
 
 def parse_params(trial: str) -> dict:
+    """Parses Length/Size/Weight/Angle from a trial name. Weight is left as None
+    (not silently bucketed into a third category) if it doesn't cleanly match
+    'Not_weighted' or 'Front_weighted' -- see add_parameter_columns, which
+    reports and quarantines any trial that fails to parse cleanly, rather than
+    letting an inconsistently-named trial silently form a spurious third Weight
+    level that would corrupt every downstream model and verdict built on it."""
     out = {k: None for k in PARAM_FACTORS}
     tokens = trial.split("_")
     joined = "_".join(tokens)
     if "Not_weighted" in joined: out["Weight"] = "Not_weighted"
     elif "Front_weighted" in joined: out["Weight"] = "Front_weighted"
-    elif "weighted" in tokens: out["Weight"] = "weighted"
     for tok in tokens:
         if tok and tok[0].upper() == "A" and tok[1:].isdigit():
             out["Angle"] = int(tok[1:]); break
@@ -400,8 +420,34 @@ def parse_params(trial: str) -> dict:
     return out
 
 def add_parameter_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Parses PARAM_FACTORS from the trial name, then LOUDLY reports and
+    quarantines (drops) any row where a factor could not be cleanly determined
+    -- rather than the previous behaviour of silently assigning a fallback
+    value that would appear as a spurious extra category in every downstream
+    model, test, and verdict. A naming inconsistency should be visible and
+    fixable at load time, not discovered three analysis stages later as an
+    unexplained statistical anomaly."""
     parsed = df["trial"].apply(parse_params).apply(pd.Series)
-    for c in PARAM_FACTORS: df[c] = parsed[c]
+    for c in PARAM_FACTORS:
+        df[c] = parsed[c]
+
+    print("\nObserved factor levels (sanity check -- each should show exactly the "
+          "expected set, with no unexpected extra category):")
+    for c in PARAM_FACTORS:
+        print(f"  {c}: {sorted(df[c].dropna().unique().tolist(), key=str)}")
+
+    bad_mask = df[PARAM_FACTORS].isna().any(axis=1)
+    if bad_mask.any():
+        bad_trials = df.loc[bad_mask, "trial"].unique()
+        print(f"\n  [WARN] {bad_mask.sum()} row(s) across {len(bad_trials)} distinct trial name(s) "
+              f"could not be cleanly parsed into Length/Size/Weight/Angle and are being QUARANTINED "
+              f"(dropped) rather than risk a spurious extra category:")
+        for t in bad_trials[:10]:
+            print(f"      '{t}'")
+        if len(bad_trials) > 10:
+            print(f"      ... and {len(bad_trials) - 10} more (see the full list in df['trial'] for "
+                  f"rows where any of Length/Size/Weight/Angle is null)")
+        df = df[~bad_mask].copy()
     return df
 
 def available_metrics(df: pd.DataFrame) -> list:
@@ -603,9 +649,42 @@ def compare_metrics(df_pen: pd.DataFrame, df_posture: pd.DataFrame, out_dir: Pat
     """Merges datasets, fits main-effects-only mixed models, outputs tables/plots."""
     print(f"\n{'='*65}\nSTARTING STATISTICAL COMPARISON (mixed-effects, main effects only)\n{'='*65}")
     if not df_pen.empty and not df_posture.empty:
-        common_cols = [c for c in ["participant", "trial", "place_index", "height", "start_t_s", "stop_t_s"]
-                       if c in df_pen.columns and c in df_posture.columns]
+        # Normalise a known naming drift between the two upstream extraction
+        # scripts (metrics.py historically used 'trial_num' where this
+        # script's own posture extraction uses 'place_index' for the same
+        # concept -- see metrics.py for the fix at the source).
+        for d in (df_pen, df_posture):
+            if "place_index" not in d.columns and "trial_num" in d.columns:
+                d.rename(columns={"trial_num": "place_index"}, inplace=True)
+
+        intended_key = ["participant", "trial", "place_index", "height"]
+        missing_pen = [c for c in intended_key if c not in df_pen.columns]
+        missing_posture = [c for c in intended_key if c not in df_posture.columns]
+        if missing_pen or missing_posture:
+            sys.exit(f"\nError: the intended merge key {intended_key} is missing column(s) "
+                     f"{missing_pen or '[]'} from the pen table and {missing_posture or '[]'} from "
+                     f"the posture table. Merging on a SUBSET of this key (e.g. dropping "
+                     f"'place_index') would silently produce a non-unique join and a many-to-many "
+                     f"merge blowup -- refusing to proceed rather than repeat that bug. Check the "
+                     f"column names in place_metrics_combined.csv and posture_features_combined.csv.")
+        common_cols = intended_key
+
+        for name, d in (("pen", df_pen), ("posture", df_posture)):
+            dup_counts = d.groupby(common_cols).size()
+            dups = dup_counts[dup_counts > 1]
+            if len(dups):
+                print(f"\n  [WARN] {name} table: merge key {common_cols} is NOT unique -- "
+                      f"{len(dups)} key combination(s) appear more than once (up to {dups.max()}x).")
+
+        n_pen, n_posture = len(df_pen), len(df_posture)
         df = pd.merge(df_pen, df_posture, on=common_cols, how="outer")
+        expected_max = max(n_pen, n_posture)
+        if len(df) > 1.2 * expected_max:
+            sys.exit(f"\nError: MERGE BLOWUP detected. Pen table has {n_pen} rows, posture table has "
+                     f"{n_posture} rows, but the merge produced {len(df)} rows. The merge key "
+                     f"{common_cols} is not unique in at least one source table (see [WARN] above) -- "
+                     f"refusing to proceed with a corrupted merge. Fix the upstream extraction so "
+                     f"(participant, trial, place_index, height) is unique in both files, then rerun.")
         print(f"Merged Pen ({len(df_pen)} rows) and Posture ({len(df_posture)} rows) into {len(df)} Place events.")
     else:
         df = df_pen if not df_pen.empty else df_posture
