@@ -30,13 +30,13 @@ STATISTICAL ENGINE (mixed-effects, MAIN EFFECTS ONLY):
 
 MODES OF OPERATION:
   1. Compare Only (Default):
-     python evaluate_difference.py --mode compare --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
+     python 05_evaluate_difference.py --mode compare --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
 
   2. Extract Only (Re-run posture extraction with simplified SPARC & Grip Comfort models):
-     python evaluate_difference.py --mode extract --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
+     python 05_evaluate_difference.py --mode extract --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
 
   3. End-to-End Pipeline (Extract features then run statistical comparisons & plots):
-     python evaluate_difference.py --mode all --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
+     python 05_evaluate_difference.py --mode all --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
 
   Optional Arguments:
      --pen-csv path/to/place_metrics.csv       (Override default pen metrics path)
@@ -101,17 +101,10 @@ POSTURE_METRICS = [
     ("reach_ratio_mean",          "Reach Ratio",                       "ratio"),
     ("wrist_elevation_m_mean",    "Wrist Elevation Above Shoulder",    "m"),
 
-    # 3. Grasp Comfort (Preferred Grip Span Model)
-    ("right_grip_span_dev_mm",    "R Grip Span Deviation (from 50mm)", "mm"),
-    ("left_grip_span_dev_mm",     "L Grip Span Deviation (from 50mm)", "mm"),
+    # 3. Grip Ergonomics
     ("right_grip_comfort_score",  "R Grip Comfort Index",              "score"),
-    ("left_grip_comfort_score",   "L Grip Comfort Index",              "score"),
-
-    # 4. Movement Smoothness & Micro-Jitter (SPARC)
     ("right_sparc_linear",        "R Linear Smoothness (SPARC)",       "val"),
-    ("left_sparc_linear",         "L Linear Smoothness (SPARC)",       "val"),
     ("right_sparc_angular",       "R Angular Smoothness (SPARC)",      "val"),
-    ("left_sparc_angular",        "L Angular Smoothness (SPARC)",      "val"),
 ]
 
 ALL_METRICS   = PEN_METRICS + POSTURE_METRICS
@@ -409,8 +402,11 @@ def parse_params(trial: str) -> dict:
     out = {k: None for k in PARAM_FACTORS}
     tokens = trial.split("_")
     joined = "_".join(tokens)
-    if "Not_weighted" in joined: out["Weight"] = "Not_weighted"
-    elif "Front_weighted" in joined: out["Weight"] = "Front_weighted"
+    low = joined.lower()
+    if "not_weighted" in low:
+        out["Weight"] = "Not_weighted"
+    elif "front_weighted" in low:
+        out["Weight"] = "Front_weighted"
     for tok in tokens:
         if tok and tok[0].upper() == "A" and tok[1:].isdigit():
             out["Angle"] = int(tok[1:]); break

@@ -51,8 +51,8 @@ WHAT THIS SCRIPT DOES:
      here) so agreement/disagreement per participant is directly visible.
 
 Usage:
-  python personalize_prototypes.py --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
-  python personalize_prototypes.py --pen-csv place_metrics_combined.csv --posture-csv posture_features_combined.csv --comparison-dir combined_comparison
+  python 07_personalize_prototypes.py --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
+  python 07_personalize_prototypes.py --pen-csv place_metrics_combined.csv --posture-csv posture_features_combined.csv --comparison-dir combined_comparison
 """
 
 import argparse

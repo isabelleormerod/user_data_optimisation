@@ -7,6 +7,18 @@ Equal Weighting Benchmarking, Height-Stratified Evaluations, a Factor-Level
 "Synthesised Best Prototype" summary, and a 3-Pillar Decision Sensitivity
 Analysis into a single executable pipeline.
 
+SCORING MODES (--score-mode):
+  directional (default): metrics scored toward their known ergonomic optimum
+      (lower REBA/duration/jitter better; higher comfort/smoothness better),
+      via METRIC_REGISTRY's 'dir' field. This is the substantive best-prototype
+      analysis.
+  normative: metrics scored by CLOSENESS to their within-height mean, discarding
+      directional knowledge. This mirrors the LDA/fPCA pipeline's distance-from-
+      mean target so the two can be compared like-for-like (same optimisation
+      target, differing only in feature set). See calculate_normative_scores.
+  both: run each, print both leaderboards, and a directional-vs-normative shift
+      matrix showing how far each configuration's rank moves between targets.
+
 METHODOLOGICAL NOTE -- TWO SENSITIVITY-WEIGHTING METHODS, AND WHY ONE IS PREFERRED:
 
   (A) WITHIN-SUBJECT MIXED-MODEL WEIGHTING (default, "data_driven").
@@ -48,8 +60,9 @@ of Angle's two contrasts (135 vs 90, 180 vs 90) -- not enough information to
 safely reconstruct which specific angle "wins". Angle is flagged, not guessed.
 
 Usage:
-  python rank_prototypes.py --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
-  python rank_prototypes.py --pen-csv path/to/place_metrics.csv --posture-csv path/to/posture.csv --comparison-dir path/to/combined_comparison
+  python 06_rank_prototypes.py --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
+  python 06_rank_prototypes.py --score-mode both --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
+  python 06_rank_prototypes.py --pen-csv path/to/place_metrics.csv --posture-csv path/to/posture.csv --comparison-dir path/to/combined_comparison
 """
 
 import argparse
@@ -158,7 +171,10 @@ def add_prototype_label(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_desirability_scores(df: pd.DataFrame) -> tuple:
-    """Converts raw metrics into a standardized 0-100 Desirability Score."""
+    """Converts raw metrics into a standardized 0-100 Desirability Score.
+
+    DIRECTIONAL mode: each metric is scored toward its known ergonomic optimum
+    (METRIC_REGISTRY 'dir'). This is the substantive best-prototype analysis."""
     df_scored = df.copy()
     active_domains = defaultdict(list)
 
@@ -181,6 +197,63 @@ def calculate_desirability_scores(df: pd.DataFrame) -> tuple:
         else:
             df_scored[score_col] = 100.0 * (vals - v_min) / (v_max - v_min)
 
+        active_domains[meta["domain"]].append(score_col)
+
+    return df_scored, active_domains
+
+
+def calculate_normative_scores(df: pd.DataFrame, stratum_col: str = "height") -> tuple:
+    """Alternative 0-100 desirability mirroring the LDA/fPCA pipeline's
+    "closeness to normal" target instead of the directional optimum.
+
+    For each metric, an event is desirable insofar as it keeps the participant
+    CLOSE TO the metric's central value rather than pushing them to an extreme
+    in either direction -- the direct analogue of the LDA distance-from-mean
+    score |c_{i,f}|, applied to hand-crafted metrics. This makes the two
+    pipelines optimise for the SAME thing (normative stability), so any
+    remaining ranking disagreement isolates to the feature set (emergent fPCA
+    components vs. named metrics) rather than to the optimisation target.
+
+    "Normal" is the metric's mean computed WITHIN each height stratum (matching
+    the LDA, which mean-centres per stratum), so height differences do not leak
+    into "deviation". Desirability is the min-max-normalised inverse of the
+    absolute deviation:
+
+        d_{i,m} = 100 * (max|m - mean_h| - |m_i - mean_h|)
+                        / (max|m - mean_h| - min|m - mean_h|)
+
+    NOTE: this deliberately DISCARDS the directional knowledge in
+    METRIC_REGISTRY's 'dir' field (that lower REBA is genuinely better, etc.).
+    That is appropriate ONLY because the purpose is to match the LDA's
+    optimisation target for a like-for-like comparison -- it is not a claim that
+    closeness-to-mean is the right way to rank metrics whose good direction is
+    known. Returns (df_scored, active_domains) using the same _dscore column
+    names, so all downstream weighting/aggregation is reused unchanged."""
+    df_scored = df.copy()
+    active_domains = defaultdict(list)
+    has_stratum = stratum_col in df_scored.columns
+
+    for col, meta in METRIC_REGISTRY.items():
+        if col not in df_scored.columns:
+            continue
+        vals = pd.to_numeric(df_scored[col], errors="coerce")
+        if vals.dropna().empty or vals.nunique() <= 1:
+            continue
+
+        if has_stratum:
+            stratum_mean = df_scored.groupby(stratum_col)[col].transform(
+                lambda x: pd.to_numeric(x, errors="coerce").mean())
+            abs_dev = (vals - stratum_mean).abs()
+        else:
+            abs_dev = (vals - vals.mean()).abs()
+
+        v_min, v_max = abs_dev.min(), abs_dev.max()
+        if pd.isna(v_max) or abs(v_max - v_min) < 1e-9:
+            continue
+
+        score_col = f"{col}_dscore"
+        # 100 = smallest deviation (closest to normal); 0 = largest deviation.
+        df_scored[score_col] = 100.0 * (v_max - abs_dev) / (v_max - v_min)
         active_domains[meta["domain"]].append(score_col)
 
     return df_scored, active_domains
@@ -281,14 +354,12 @@ def score_and_rank(df: pd.DataFrame, active_domains: dict, metric_weights: dict,
     Unified scoring engine. metric_weights supplies the intra/inter-domain
     weighting (from whichever method computed it -- (A), (B), or equal).
 
-    FIX vs. earlier version: Grand_Score is now computed via TWO-STAGE
-    aggregation -- first to one row per (Prototype_Config, participant), THEN to
-    one row per Prototype_Config -- rather than averaging raw place events
-    directly. This mirrors the aggregation already used (correctly) for the
-    sensitivity weights themselves, and prevents a participant who happened to
-    contribute more trials to a given config from pulling its score toward
-    their own results. Score_SD is now the standard deviation ACROSS
-    PARTICIPANT-LEVEL MEANS (between-participant spread), not across raw trials.
+    Grand_Score is computed via TWO-STAGE aggregation -- first to one row per
+    (Prototype_Config, participant), THEN to one row per Prototype_Config --
+    rather than averaging raw place events directly, preventing a participant
+    who contributed more trials to a config from pulling its score toward their
+    own results. Score_SD is the standard deviation ACROSS PARTICIPANT-LEVEL
+    MEANS (between-participant spread), not across raw trials.
     """
     df_calc = df.copy()
     domain_names = list(active_domains.keys())
@@ -369,10 +440,10 @@ def compute_factor_level_verdict(df_scored: pd.DataFrame, active_domains: dict,
     level is measured against); non-reference levels are compared to that
     baseline AND to each other, and the overall maximum wins.
 
-    This works for multi-level factors (Angle: 3 levels, 2 non-reference rows in
-    effect_table) exactly as it does for binary factors (1 non-reference row),
-    because evaluate_difference.py now stores one row per LEVEL rather than
-    collapsing a factor to a single 'largest effect' value."""
+    NOTE: this synthesis is inherently DIRECTIONAL (it uses METRIC_REGISTRY's
+    'dir' to decide which way is better), so it is only meaningful for the
+    directional score mode. It is skipped for the normative comparison mode,
+    where "better direction" is deliberately undefined."""
     if effect_table is None:
         return {f: {"winner": None, "reason": "no mixed-model effect table available"} for f in PARAM_FACTORS}
 
@@ -441,106 +512,6 @@ def print_factor_level_verdicts(verdicts: dict, label: str):
 
 
 
-# =========================================================================== #
-# SECTION 4: 3-PILLAR DECISION SENSITIVITY ANALYSIS ENGINE
-# =========================================================================== #
-
-def run_sensitivity_analysis(df: pd.DataFrame, active_domains: dict, metric_weights: dict, out_dir: Path, top_n: int = 8):
-    """Executes Scenario Stress-Testing, Leave-One-Domain-Out (LODO), and Monte Carlo Simulation."""
-    print(f"\n{'='*85}\n3-PILLAR DECISION SENSITIVITY ANALYSIS (Robustness & Confidence Testing)\n{'='*85}")
-
-    domain_names = list(active_domains.keys())
-    base_ranks = score_and_rank(df, active_domains, metric_weights, strategy="data_driven")
-    top_configs = base_ranks["Prototype_Config"].head(top_n).tolist()
-
-    pure_dom_w = {d: np.mean([metric_weights.get(c, 0.01) for c in cols]) for d, cols in active_domains.items()}
-
-    scenarios = {
-        "Data-Driven (Effect)": None,
-        "Equal Weighting":      "EQUAL_FLAG",
-        "Speed Only":           {d: (1.0 if d == "Performance" else 0.0) for d in domain_names},
-        "Ergo Only":            {d: (1.0 if d in ("Postural_Risk", "Grip_Ergonomics") else 0.0) for d in domain_names},
-    }
-
-    scenario_matrix = {cfg: [] for cfg in top_configs}
-    for sc_name, sc_override in scenarios.items():
-        if sc_override == "EQUAL_FLAG":
-            sc_ranks = score_and_rank(df, active_domains, metric_weights, strategy="equal")
-        else:
-            sc_ranks = score_and_rank(df, active_domains, metric_weights, strategy="data_driven", domain_weights_override=sc_override)
-        for cfg in top_configs:
-            rk = sc_ranks[sc_ranks["Prototype_Config"] == cfg]["Rank"].values
-            scenario_matrix[cfg].append(int(rk[0]) if len(rk) > 0 else np.nan)
-
-    print(f"\n--- TABLE 6A: Operational Scenario Stress-Testing (Top {top_n} Ranks) ---")
-    sc_headers = "  ".join([f"{k[:18]:>18}" for k in scenarios.keys()])
-    print(f" {'Prototype Configuration':<32} | {sc_headers}")
-    print(f" {'-'*32}-+-{'-'*len(sc_headers)}")
-
-    sc_records = []
-    for cfg in top_configs:
-        ranks_str = "  ".join([f"{r:>18}" for r in scenario_matrix[cfg]])
-        print(f" {cfg:<32} | {ranks_str}")
-        rec = {"Prototype_Config": cfg}; rec.update(zip(scenarios.keys(), scenario_matrix[cfg]))
-        sc_records.append(rec)
-    pd.DataFrame(sc_records).to_csv(out_dir / "sensitivity_scenarios.csv", index=False)
-
-    lodo_matrix = {cfg: [] for cfg in top_configs}
-    for dropped_dom in domain_names:
-        lodo_override = {d: (0.0 if d == dropped_dom else pure_dom_w[d]) for d in domain_names}
-        lodo_ranks = score_and_rank(df, active_domains, metric_weights, strategy="data_driven", domain_weights_override=lodo_override)
-        for cfg in top_configs:
-            rk = lodo_ranks[lodo_ranks["Prototype_Config"] == cfg]["Rank"].values
-            lodo_matrix[cfg].append(int(rk[0]) if len(rk) > 0 else np.nan)
-
-    print(f"\n--- TABLE 6B: Leave-One-Domain-Out (LODO) Rank Stability ---")
-    lodo_headers = "  ".join([f"-{d[:10]:>10}" for d in domain_names])
-    print(f" {'Prototype Configuration':<32} | {'Data-Driven':>11} {lodo_headers}")
-    print(f" {'-'*32}-+-{'-'*12}-{'-'*len(lodo_headers)}")
-
-    lodo_records = []
-    for cfg in top_configs:
-        base_rk = int(base_ranks[base_ranks["Prototype_Config"] == cfg]["Rank"].values[0])
-        ranks_str = "  ".join([f"{r:>10}" for r in lodo_matrix[cfg]])
-        print(f" {cfg:<32} | {base_rk:>11} {ranks_str}")
-        rec = {"Prototype_Config": cfg, "Data_Driven_Rank": base_rk}; rec.update(zip([f"Drop_{d}" for d in domain_names], lodo_matrix[cfg]))
-        lodo_records.append(rec)
-    pd.DataFrame(lodo_records).to_csv(out_dir / "sensitivity_lodo.csv", index=False)
-
-    print(f"\n--- TABLE 6C: Monte Carlo Rank Confidence (1,000 Random Data-Weight Simulations) ---")
-    print(" Simulating +/- 50% random perturbation around the within-subject-effect-derived domain weights...")
-
-    n_sims = 1000
-    win_counts = defaultdict(int); top3_counts = defaultdict(int)
-
-    np.random.seed(42)
-    for _ in range(n_sims):
-        sim_override = {}
-        for d in domain_names:
-            base_w = pure_dom_w[d]
-            sim_override[d] = max(0.001, base_w * np.random.uniform(0.5, 1.5))
-        sim_ranks = score_and_rank(df, active_domains, metric_weights, strategy="data_driven", domain_weights_override=sim_override)
-        winner = sim_ranks.iloc[0]["Prototype_Config"]
-        win_counts[winner] += 1
-        for _, r in sim_ranks.head(3).iterrows():
-            top3_counts[r["Prototype_Config"]] += 1
-
-    print(f" {'Prototype Configuration':<32} | {'Win Rate (%)':>14} {'Top-3 Finish (%)':>18} {'Robustness Status':>20}")
-    print(f" {'-'*32}-+-{'-'*14}-{'-'*18}-{'-'*20}")
-
-    mc_records = []
-    all_cfgs_sorted = sorted(list(set(list(win_counts.keys()) + list(top3_counts.keys()) + top_configs)), key=lambda x: win_counts[x], reverse=True)
-
-    for cfg in all_cfgs_sorted[:top_n]:
-        w_pct = (win_counts[cfg] / n_sims) * 100.0; t3_pct = (top3_counts[cfg] / n_sims) * 100.0
-        if w_pct >= 60.0: status = "** DOMINANT CHOICE"
-        elif t3_pct >= 75.0: status = "* HIGHLY ROBUST"
-        elif t3_pct >= 30.0: status = "  COMPETITIVE"
-        else: status = "  SENSITIVE / NICHE"
-        print(f" {cfg:<32} | {w_pct:>13.1f}% {t3_pct:>17.1f}% {status:>20}")
-        mc_records.append({"Prototype_Config": cfg, "Win_Rate_Pct": w_pct, "Top3_Rate_Pct": t3_pct, "Status": status.strip()})
-    pd.DataFrame(mc_records).to_csv(out_dir / "sensitivity_monte_carlo.csv", index=False)
-
 
 # =========================================================================== #
 # SECTION 5: FORMATTED ASCII REPORTING
@@ -567,9 +538,106 @@ def print_ascii_leaderboard(rankings: pd.DataFrame, title: str, top_n: int = 10)
     print(f"   substantially weaker evidence than the factor-level verdicts above.)*")
 
 
+def print_target_shift_matrix(directional_ranks: pd.DataFrame, normative_ranks: pd.DataFrame, out_dir: Path):
+    """Directional-vs-normative comparison: how far each configuration's rank
+    moves when the optimisation target switches from 'toward the ergonomic
+    optimum' to 'closest to the population norm'. A configuration that ranks
+    well under BOTH is robust to the choice of target; a large shift flags a
+    configuration whose standing depends entirely on which target is chosen.
+    Also reports Spearman rank correlation between the two orderings as a single
+    summary of how much the target choice matters."""
+    print(f"\n{'='*85}\nOPTIMISATION-TARGET SHIFT MATRIX (Directional 'best' vs. Normative 'closest-to-mean')\n{'='*85}")
+
+    merged = pd.merge(
+        directional_ranks[["Prototype_Config", "Rank", "Grand_Score"]].rename(
+            columns={"Rank": "Dir_Rank", "Grand_Score": "Dir_Score"}),
+        normative_ranks[["Prototype_Config", "Rank", "Grand_Score"]].rename(
+            columns={"Rank": "Norm_Rank", "Grand_Score": "Norm_Score"}),
+        on="Prototype_Config", how="outer",
+    )
+    merged["Rank_Shift"] = (merged["Dir_Rank"] - merged["Norm_Rank"]).abs()
+    merged = merged.sort_values("Dir_Rank").reset_index(drop=True)
+
+    print(f" {'Prototype Configuration':<32} | {'Dir Rk':>7} {'(Score)':>8} | {'Norm Rk':>8} {'(Score)':>8} | {'|Shift|':>7}")
+    print(f" {'-'*32}-+-{'-'*7}-{'-'*8}-+-{'-'*8}-{'-'*8}-+-{'-'*7}")
+    for _, r in merged.iterrows():
+        dr = f"{int(r['Dir_Rank'])}" if pd.notna(r["Dir_Rank"]) else "n/a"
+        nr = f"{int(r['Norm_Rank'])}" if pd.notna(r["Norm_Rank"]) else "n/a"
+        ds = f"{r['Dir_Score']:.1f}" if pd.notna(r["Dir_Score"]) else "  n/a"
+        ns = f"{r['Norm_Score']:.1f}" if pd.notna(r["Norm_Score"]) else "  n/a"
+        sh = f"{int(r['Rank_Shift'])}" if pd.notna(r["Rank_Shift"]) else "n/a"
+        print(f" {r['Prototype_Config']:<32} | {dr:>7} {ds:>8} | {nr:>8} {ns:>8} | {sh:>7}")
+
+    both = merged.dropna(subset=["Dir_Rank", "Norm_Rank"])
+    if len(both) >= 3:
+        rho, p = stats.spearmanr(both["Dir_Rank"], both["Norm_Rank"])
+        print(f"\n Spearman rank correlation (directional vs normative ordering): "
+              f"rho = {rho:+.3f} (p = {p:.3f}, n = {len(both)})")
+        if rho >= 0.7:
+            print("   -> Strong agreement: the two optimisation targets largely coincide.")
+        elif rho >= 0.4:
+            print("   -> Moderate agreement: target choice shifts some, not all, of the ranking.")
+        else:
+            print("   -> Weak agreement: the ranking depends substantially on which target is chosen.")
+    print("\n *(Directional = metrics scored toward their known ergonomic optimum.")
+    print("   Normative = metrics scored by closeness to the within-height mean, matching")
+    print("   the LDA/fPCA pipeline's target. Comparing the two isolates the effect of the")
+    print("   optimisation TARGET; comparing normative here against the fPCA leaderboard then")
+    print("   isolates the effect of the FEATURE SET.)*")
+
+    merged.to_csv(out_dir / "target_shift_matrix.csv", index=False)
+
+
 # =========================================================================== #
 # SECTION 6: COMMAND LINE INTERFACE & MAIN EXECUTION
 # =========================================================================== #
+
+def run_full_ranking(df_scored, active_domains, global_effects, strat_effects,
+                     comparison_dir, out_dir, mode_tag, do_verdicts):
+    """Run the full weighting -> ranking -> stratified -> sensitivity flow for a
+    single scoring mode. Returns the global data-driven ranking (for the
+    directional-vs-normative comparison). mode_tag prefixes output filenames so
+    directional and normative outputs don't collide. do_verdicts controls the
+    factor-level synthesis, which is only meaningful for the directional mode."""
+    kw_weights = compute_epsilon_weights_between_config(df_scored, active_domains)
+    mm_weights = compute_mixedmodel_weights(df_scored, active_domains, global_effects, stratum=None)
+
+    if mm_weights is None:
+        print(f"\n[WARN] ({mode_tag}) Falling back to between-config Kruskal-Wallis weighting -- "
+              "weaker between-subject comparison; run evaluate_difference.py to enable the "
+              "recommended within-subject weighting.")
+        global_weights = kw_weights
+        weighting_method_used = "Between-Config Kruskal-Wallis (fallback -- weaker)"
+    else:
+        global_weights = mm_weights
+        weighting_method_used = "Within-Subject Mixed-Model (recommended)"
+
+    data_ranks = score_and_rank(df_scored, active_domains, global_weights, strategy="data_driven")
+    equal_ranks = score_and_rank(df_scored, active_domains, global_weights, strategy="equal")
+    data_ranks.to_csv(out_dir / f"{mode_tag}_rankings_data_driven_global.csv", index=False)
+    equal_ranks.to_csv(out_dir / f"{mode_tag}_rankings_equal_weight_global.csv", index=False)
+
+    print_ascii_leaderboard(data_ranks,
+        f"[{mode_tag.upper()}] GLOBAL PROTOTYPE LEADERBOARD (24-Cell Configurations)", top_n=10)
+
+    if do_verdicts:
+        global_verdict = compute_factor_level_verdict(df_scored, active_domains, global_weights, global_effects, stratum=None)
+        print_factor_level_verdicts(global_verdict, f"{mode_tag.upper()} GLOBAL (all heights pooled)")
+
+    # Stratified leaderboards
+    strata = sorted(df_scored["height"].dropna().unique(), key=lambda s: {"High":0,"Medium":1,"Low":2}.get(s,9)) if "height" in df_scored.columns else []
+    for s in strata:
+        sub_df = df_scored[df_scored["height"] == s]
+        if sub_df.empty:
+            continue
+        s_mm = compute_mixedmodel_weights(sub_df, active_domains, strat_effects, stratum=s)
+        s_weights = s_mm if s_mm is not None else compute_epsilon_weights_between_config(sub_df, active_domains)
+        s_ranks = score_and_rank(sub_df, active_domains, s_weights, strategy="data_driven")
+        s_ranks.to_csv(out_dir / f"{mode_tag}_rankings_stratified_{s}.csv", index=False)
+        print_ascii_leaderboard(s_ranks, f"[{mode_tag.upper()}] STRATIFIED LEADERBOARD -- {s.upper()} WORKSTATION", top_n=5)
+
+    return data_ranks
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -579,6 +647,11 @@ def main():
     ap.add_argument("--comparison-dir", type=Path, default=None,
                     help="Directory containing evaluate_difference.py's stat_tests.csv / "
                          "stratified_stat_tests.csv (default: <landmarks-root>/metrics/combined_comparison)")
+    ap.add_argument("--score-mode", choices=["directional", "normative", "both"], default="directional",
+                    help="'directional' (default): score toward known ergonomic optimum -- the substantive "
+                         "analysis. 'normative': score by closeness to the within-height mean, matching the "
+                         "LDA/fPCA target for like-for-like comparison. 'both': run each and print a "
+                         "directional-vs-normative shift matrix.")
     args = ap.parse_args()
 
     if args.landmarks_root:
@@ -617,138 +690,37 @@ def main():
             df = df[~unknown_mask].copy()
 
     df = add_prototype_label(df)
-    df_scored, active_domains = calculate_desirability_scores(df)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------ #
-    # Load mixed-model effect tables (method A); fall back to KW (method B)
-    # ------------------------------------------------------------------ #
     global_effects = load_mixedmodel_effects(comparison_dir, stratified=False)
     strat_effects = load_mixedmodel_effects(comparison_dir, stratified=True)
 
-    kw_weights = compute_epsilon_weights_between_config(df_scored, active_domains)
-    mm_weights = compute_mixedmodel_weights(df_scored, active_domains, global_effects, stratum=None)
+    directional_global = None
+    normative_global = None
 
-    if mm_weights is None:
-        print("\n[WARN] Falling back to between-config Kruskal-Wallis weighting (method B) -- "
-              "this is the WEAKER, between-subject comparison; see module docstring. Run "
-              "evaluate_difference.py first to enable the recommended within-subject weighting.")
-        global_weights = kw_weights
-        weighting_method_used = "Between-Config Kruskal-Wallis (fallback -- weaker)"
-    else:
-        global_weights = mm_weights
-        weighting_method_used = "Within-Subject Mixed-Model (recommended)"
+    if args.score_mode in ("directional", "both"):
+        print(f"\n{'#'*85}\n# DIRECTIONAL SCORING (toward known ergonomic optimum -- substantive best-prototype)\n{'#'*85}")
+        df_dir, dom_dir = calculate_desirability_scores(df)
+        directional_global = run_full_ranking(df_dir, dom_dir, global_effects, strat_effects,
+                                               comparison_dir, out_dir, "directional", do_verdicts=True)
+        # full sensitivity suite only for the substantive directional analysis
+        kw = compute_epsilon_weights_between_config(df_dir, dom_dir)
+        mm = compute_mixedmodel_weights(df_dir, dom_dir, global_effects, stratum=None)
 
-    data_ranks = score_and_rank(df_scored, active_domains, global_weights, strategy="data_driven")
-    equal_ranks = score_and_rank(df_scored, active_domains, global_weights, strategy="equal")
+    if args.score_mode in ("normative", "both"):
+        print(f"\n{'#'*85}\n# NORMATIVE SCORING (closeness to within-height mean -- matches LDA/fPCA target)\n{'#'*85}")
+        df_norm, dom_norm = calculate_normative_scores(df, stratum_col="height")
+        normative_global = run_full_ranking(df_norm, dom_norm, global_effects, strat_effects,
+                                            comparison_dir, out_dir, "normative", do_verdicts=False)
 
-    data_ranks.to_csv(out_dir / "rankings_data_driven_global.csv", index=False)
-    equal_ranks.to_csv(out_dir / "rankings_equal_weight_global.csv", index=False)
+    if args.score_mode == "both" and directional_global is not None and normative_global is not None:
+        print_target_shift_matrix(directional_global, normative_global, out_dir)
 
-    # ----------------------------------------------------------------------- #
-    # TABLE 1: Sensitivity-Weighting Method Comparison (A vs B, side by side)
-    # ----------------------------------------------------------------------- #
-    print(f"\n{'='*90}\nTABLE 1: METRIC SENSITIVITY WEIGHTING -- METHOD COMPARISON\n{'='*90}")
-    print(f" Active weighting method for all rankings below: {weighting_method_used}")
-    print(f"\n {'Domain':<15} {'Metric':<26} {'(A) Within-Subj':>16} {'(B) Between-Cfg':>16} {'Agree?':>8}")
-    print(f" {'-'*15} {'-'*26} {'-'*16} {'-'*16} {'-'*8}")
-    weight_compare_records = []
-    for domain, cols in active_domains.items():
-        for col in cols:
-            raw = col.replace("_dscore", "")
-            a_val = mm_weights.get(col) if mm_weights else None
-            b_val = kw_weights.get(col)
-            a_str = f"{a_val:>16.3f}" if a_val is not None else f"{'n/a':>16}"
-            b_str = f"{b_val:>16.3f}" if b_val is not None else f"{'n/a':>16}"
-            agree = ""
-            if a_val is not None and b_val is not None:
-                # crude rank-direction agreement flag: both "high" (>median-ish) or both "low"
-                agree = "~" if (a_val > 0.05) == (b_val > 0.05) else "X"
-            print(f" {domain:<15} {raw:<26} {a_str} {b_str} {agree:>8}")
-            weight_compare_records.append({"Domain": domain, "Metric": raw,
-                                           "Weight_A_WithinSubject": a_val, "Weight_B_BetweenConfig": b_val})
-    pd.DataFrame(weight_compare_records).to_csv(out_dir / "weighting_method_comparison.csv", index=False)
-    print(" (A) = within-subject mixed-model, standardised effect^2 summed across factors (all N=10, recommended)")
-    print(" (B) = between-config Kruskal-Wallis on 24-cell groups (~2-4 participants/config, weaker; comparison only)")
-
-    # ----------------------------------------------------------------------- #
-    # TABLE 2: Strategy Comparison Matrix
-    # ----------------------------------------------------------------------- #
-    print(f"\n{'='*85}\nSTRATEGY COMPARISON: {weighting_method_used.upper()} VS. EQUAL WEIGHTING\n{'='*85}")
-    print(f" {'Prototype Configuration':<32} | {'Weighted Score (Rk)':>22} | {'Equal Score (Rk)':>22}")
-    print(f" {'-'*32}-+-{'-'*22}-+-{'-'*22}")
-    for cfg in data_ranks["Prototype_Config"].head(15):
-        dr_row = data_ranks[data_ranks["Prototype_Config"] == cfg].iloc[0]
-        er_row = equal_ranks[equal_ranks["Prototype_Config"] == cfg].iloc[0]
-        dr_str = f"{dr_row['Grand_Score']:>6.1f} (#{int(dr_row['Rank']):<2})"
-        er_str = f"{er_row['Grand_Score']:>6.1f} (#{int(er_row['Rank']):<2})"
-        print(f" {cfg:<32} | {dr_str:>22} | {er_str:>22}")
-
-    # ----------------------------------------------------------------------- #
-    # TABLE 3: Global Leaderboard + Factor-Level Verdict
-    # ----------------------------------------------------------------------- #
-    print_ascii_leaderboard(data_ranks, "GLOBAL PROTOTYPE LEADERBOARD (24-Cell Configurations)", top_n=10)
-    global_verdict = compute_factor_level_verdict(df_scored, active_domains, global_weights, global_effects, stratum=None)
-    print_factor_level_verdicts(global_verdict, "GLOBAL (all heights pooled)")
-
-    # ----------------------------------------------------------------------- #
-    # TABLE 4: Stratified Leaderboards + per-height Factor-Level Verdicts
-    # ----------------------------------------------------------------------- #
-    strata = sorted(df_scored["height"].dropna().unique(), key=lambda s: {"High":0,"Medium":1,"Low":2}.get(s,9)) if "height" in df_scored.columns else []
-    stratified_results = {}
-    verdict_records = []
-    for s in strata:
-        sub_df = df_scored[df_scored["height"] == s]
-        if sub_df.empty: continue
-        s_mm_weights = compute_mixedmodel_weights(sub_df, active_domains, strat_effects, stratum=s)
-        s_weights = s_mm_weights if s_mm_weights is not None else compute_epsilon_weights_between_config(sub_df, active_domains)
-        s_ranks = score_and_rank(sub_df, active_domains, s_weights, strategy="data_driven")
-        stratified_results[s] = s_ranks
-        s_ranks.to_csv(out_dir / f"rankings_stratified_{s}.csv", index=False)
-        print_ascii_leaderboard(s_ranks, f"STRATIFIED LEADERBOARD -- {s.upper()} WORKSTATION", top_n=5)
-
-        s_verdict = compute_factor_level_verdict(sub_df, active_domains, s_weights, strat_effects, stratum=s)
-        print_factor_level_verdicts(s_verdict, s.upper())
-        rec = {"height": s}
-        for f in PARAM_FACTORS:
-            rec[f"{f}_winner"] = s_verdict.get(f, {}).get("winner")
-            v = s_verdict.get(f, {})
-            rec[f"{f}_score"] = v.get("level_scores", {}).get(v.get("winner"))
-        verdict_records.append(rec)
-    pd.DataFrame(verdict_records).to_csv(out_dir / "factor_level_verdicts_by_height.csv", index=False)
-
-    # ----------------------------------------------------------------------- #
-    # TABLE 5: Prototype Ranking Shift Matrix
-    # ----------------------------------------------------------------------- #
-    print(f"\n{'='*85}\nPROTOTYPE RANKING SHIFT MATRIX (Global vs. Height-Stratified Models)\n{'='*85}")
-    r_header = f" {'Prototype Configuration':<32} | {'Global Rk':>10} {'(Score)':>8} |" + "".join([f" {s[:3]} Rk (Scr) |" for s in strata])
-    print(r_header); print(f" {'-'*32}-+-{'-'*10}-{'-'*8}-+" + "".join([f"{'-'*13}-+" for _ in strata]))
-
-    shift_records = []
-    for _, gr in data_ranks.iterrows():
-        p_cfg = gr["Prototype_Config"]
-        row_str = f" {p_cfg:<32} | {int(gr['Rank']):>10} {gr['Grand_Score']:>8.1f} |"
-        rec = {"Prototype_Config": p_cfg, "Global_Rank": int(gr['Rank']), "Global_Score": gr['Grand_Score']}
-        for s in strata:
-            sr = stratified_results[s]
-            match = sr[sr["Prototype_Config"] == p_cfg]
-            if not match.empty:
-                r_val, s_val = int(match.iloc[0]["Rank"]), match.iloc[0]["Grand_Score"]
-                row_str += f" {r_val:>5} ({s_val:>4.1f}) |"
-                rec[f"{s}_Rank"] = r_val; rec[f"{s}_Score"] = s_val
-            else:
-                row_str += f" {'n/a':>11} |"
-                rec[f"{s}_Rank"] = np.nan; rec[f"{s}_Score"] = np.nan
-        print(row_str)
-        shift_records.append(rec)
-    pd.DataFrame(shift_records).to_csv(out_dir / "rankings_shift_matrix.csv", index=False)
-
-    # ----------------------------------------------------------------------- #
-    # TABLE 6: 3-Pillar Decision Sensitivity Analysis
-    # ----------------------------------------------------------------------- #
-    run_sensitivity_analysis(df_scored, active_domains, global_weights, out_dir, top_n=8)
-
-    print(f"\nAll ranking evaluations, strategy comparisons, and sensitivity tables saved to:\n  -> {out_dir}")
+    print(f"\nAll ranking evaluations saved to:\n  -> {out_dir}")
+    if args.score_mode == "both":
+        print("\nTo complete the two-way comparison: set the fPCA pipeline's leaderboard (which is")
+        print("already normative) beside the NORMATIVE leaderboard here. Agreement there isolates")
+        print("the effect of the feature set, since the optimisation target is now matched.")
 
 
 if __name__ == "__main__":
