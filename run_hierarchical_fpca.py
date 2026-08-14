@@ -23,9 +23,17 @@ detecting Place events on the fly -- no separate extraction step or manifest.
     for each design factor (Length, Size, Weight, Angle) within each height
     stratum, using the combined normalised feature vector as predictors.
 
-  Ranking: design factors weighted two ways -- fixed (equal) and data-driven
-    (proportional to each factor's discriminant eigenvalue) -- reported side
-    by side.
+  Factor-influence leaderboard (per height stratum): factors are ranked by a
+    data-driven weight = each factor's summed LDA eigenvalue (summed over its
+    n_levels-1 discriminant axes, so 3-level Angle is not penalised), normalised
+    across the four factors. The eigenvalue is scatter-normalised (between- over
+    within-level scatter), so a factor scores high only if it separates the
+    levels far RELATIVE to within-level spread -- "how differently, and how
+    consistently, does this factor move people through the condensed feature
+    space." A permutation test on the LDA1 separation gives significance, and a
+    2x2 PCA scatter (one panel per factor, coloured by level) visualises the
+    clustering. The earlier desirability / distance-from-mean config leaderboard
+    has been removed in favour of this.
 
 DISCOVERY (matches evaluate_difference.py):
   Walks <root>/<PID>/<trial>/, finds the labelled pen file
@@ -91,11 +99,17 @@ from scipy.linalg import eigh
 import fdasrsf as fs
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 warnings.simplefilter("ignore")
 
 PARAM_FACTORS = ["Length", "Size", "Weight", "Angle"]
 HEIGHTS = ["High", "Medium", "Low"]
+VALID_HEIGHTS = ["High", "Medium", "Low"]    # the only height strata ever analysed
+USE_ZFILT = True   # set from --no-zfilt in main(); redirects body reads to *_body_zfilt.csv
 
 # Number of fPCA components each domain is compressed to. Per-domain (not one
 # shared value) so hand/body/pen -- which differ a lot in raw dimensionality
@@ -181,12 +195,44 @@ def pen_stem(pen_path: Path) -> str:
 
 
 def find_sibling(trial_dir: Path, stem: str, stream: str):
-    """Prefer labelled sibling, fall back to unlabelled."""
-    for name in (f"{stem}_{stream}_labelled.csv", f"{stem}_{stream}.csv"):
+    """Prefer the median-filtered body (from clean_place_events.py) when present,
+    then the labelled sibling, then unlabelled. Only body has a _zfilt variant."""
+    names = []
+    if USE_ZFILT and stream == "body":
+        names.append(f"{stem}_body_zfilt.csv")
+    names += [f"{stem}_{stream}_labelled.csv", f"{stem}_{stream}.csv"]
+    for name in names:
         p = trial_dir / name
         if p.is_file():
             return p
     return None
+
+
+def _event_key(participant, trial, height, place_index):
+    """Match key against the cleaning manifest; place_index is per-height (== the
+    manifest's place_index_in_height)."""
+    try:
+        pi = int(place_index)
+    except (ValueError, TypeError):
+        return None
+    return (str(participant), str(trial), str(height), pi)
+
+
+def load_excluded_events(exclude_csv):
+    """Load excluded_place_events.csv (clean_place_events.py) as a set of
+    (participant, trial, height, place_index) keys. Empty set if absent."""
+    if exclude_csv is None or not Path(exclude_csv).is_file():
+        print(f"  [exclude] no cleaning manifest at {exclude_csv}; no events excluded.")
+        return set()
+    ex = pd.read_csv(exclude_csv)
+    need = {"participant", "trial", "height", "place_index_in_height"}
+    if not need.issubset(ex.columns):
+        print(f"  [exclude] manifest missing {need - set(ex.columns)}; skipping exclusion.")
+        return set()
+    keys = {k for k in (_event_key(r["participant"], r["trial"], r["height"], r["place_index_in_height"])
+                        for _, r in ex.iterrows()) if k is not None}
+    print(f"  [exclude] loaded {len(keys)} rejected place event(s) from {Path(exclude_csv).name}")
+    return keys
 
 
 def iter_trials_labelled(root: Path, participant_filter):
@@ -425,7 +471,7 @@ def build_event_curves(df_pen, df_body, df_hand, s, e, n_grid):
     return {"ref": ref, "curves": curves}
 
 
-def collect_events(root, participant_filter, n_grid):
+def collect_events(root, participant_filter, n_grid, exclude_keys=None):
     """Walk all trials, detect Place events, build per-event curves.
     Returns (events_meta DataFrame, event_data dict keyed by meta index)."""
     trials = list(iter_trials_labelled(root, participant_filter))
@@ -433,9 +479,11 @@ def collect_events(root, participant_filter, n_grid):
         sys.exit(f"ERROR: no trial folders with a labelled pen file under {root}")
     print(f"Discovered {len(trials)} trial folder(s).")
 
+    exclude_keys = exclude_keys or set()
     meta_rows = []
     event_data = {}
     eid = 0
+    n_excluded = 0
 
     for stem, pid, trial_dir in trials:
         pen_path = find_labelled_pen(trial_dir)
@@ -461,6 +509,9 @@ def collect_events(root, participant_filter, n_grid):
         counters = {}
         for (s, e), h in zip(places, heights_for_places):
             counters[h] = counters.get(h, 0) + 1
+            if exclude_keys and _event_key(pid, stem, h, counters[h]) in exclude_keys:
+                n_excluded += 1
+                continue
             built = build_event_curves(df_pen, df_body, df_hand, s, e, n_grid)
             if built is None:
                 continue
@@ -473,9 +524,26 @@ def collect_events(root, participant_filter, n_grid):
             eid += 1
         print(f"  [{len(places):>4}] {stem}: {len(places)} Place event(s)")
 
+    if exclude_keys:
+        print(f"\n  [exclude] skipped {n_excluded} manifest-rejected place event(s).")
+
     meta = pd.DataFrame(meta_rows)
     if meta.empty:
         return meta, event_data
+
+    # Quarantine events with no valid working-height label (midpoint fell outside
+    # every High/Medium/Low window). Defensive: the HEIGHTS analysis loop already
+    # ignores non-H/M/L strata, but this keeps the cache and place_events_meta.csv
+    # clean and matters if the cache is ever used pooled / un-stratified.
+    if "height" in meta.columns:
+        meta["height"] = meta["height"].astype(str).str.strip()
+        bad_h = ~meta["height"].isin(VALID_HEIGHTS)
+        if bad_h.any():
+            print(f"  [QUARANTINE] Dropping {int(bad_h.sum())} event(s) with no valid "
+                  f"High/Medium/Low label (height='Unknown'/blank).")
+            keep_ids = meta.index[~bad_h]
+            event_data = {eid: event_data[eid] for eid in keep_ids if eid in event_data}
+            meta = meta.loc[keep_ids].copy()
 
     # Quarantine any event whose prototype factors did not fully parse from
     # the filename (matches evaluate_difference.py's add_parameter_columns:
@@ -684,35 +752,441 @@ def fit_lda_factor(X, labels, ridge=1e-6):
             "class_means": class_means, "classes": [str(c) for c in classes]}
 
 
-def build_ranking(lda_results):
-    valid = [f for f, r in lda_results.items() if r is not None]
-    if not valid:
-        return None, None
-    etas = {f: lda_results[f]["eta1"] for f in valid}
-    total = sum(etas.values())
-    fixed_w = {f: 1.0 / len(valid) for f in valid}
-    data_w = {f: (etas[f] / total if total > 0 else fixed_w[f]) for f in valid}
-    rows = []
-    for f in valid:
-        for level, mean_score in lda_results[f]["class_means"].items():
-            rows.append({"factor": f, "level": level, "mean_canonical_score": mean_score,
-                         "eta1": etas[f], "fixed_weight": fixed_w[f], "data_weight": data_w[f]})
-    return pd.DataFrame(rows), {"fixed": fixed_w, "data_driven": data_w}
+def _factor_eta_sum(X, labels, ridge=1e-6):
+    """Summed LDA eigenvalue for one factor: the sum of the (n_levels-1)
+    discriminant-axis eigenvalues (so a 3-level factor like Angle is not
+    penalised for spreading its separation across two axes). Scatter-normalised
+    by construction (each eigenvalue is between/within scatter). Returns
+    (eta_sum, n_levels)."""
+    labels = np.asarray(labels, dtype=object)
+    keep = np.array([l is not None and not (isinstance(l, float) and np.isnan(l)) for l in labels])
+    Xv, lv = X[keep], labels[keep]
+    classes = np.unique(lv)
+    if len(classes) < 2:
+        return np.nan, len(classes)
+    eigs = _lda_eigenvalues(Xv, lv, ridge)
+    if eigs is None:
+        return np.nan, len(classes)
+    n_axes = len(classes) - 1
+    vals = np.clip(np.asarray(eigs[:n_axes], dtype=float), 0.0, None)
+    vals = vals[np.isfinite(vals)]
+    return (float(np.sum(vals)) if len(vals) else np.nan), len(classes)
 
 
-# ============================================================================
-# 10. Prototype leaderboard: distance-from-mean scoring on LDA canonical scores
-#
-# This is the only thing LDA canonical scores can support: how far a
-# prototype's movement sits from the grand mean (0) along each factor's
-# discriminant axis. There is no notion of "which direction is better" here
-# (unlike rank_prototypes.py's METRIC_REGISTRY, which knows e.g. lower
-# duration is better) -- only how atypical a prototype's movement is. The
-# working assumption, made explicit rather than silent, is that movement
-# closer to the population-average profile is the more ergonomic one, so
-# 100 = closest to the mean, 0 = most extreme deviation, same convention as
-# the desirability scores in rank_prototypes.py.
-# ============================================================================
+def build_factor_leaderboard(X, sub_meta, height, n_perm, pvalue_rows):
+    """Per-factor LDA-separation leaderboard for one height stratum.
+
+    Data-driven weight = each factor's summed LDA eigenvalue normalised across
+    the four factors -- 'how strongly, and how consistently, does this factor
+    move people through the condensed feature space'. eigenvalue is scatter-
+    normalised, so a factor scores high only if it separates the levels far
+    RELATIVE to within-level spread, not merely along a high-variance direction.
+    Also reports an equal-weight benchmark, each level's canonical mean on LDA1
+    (which way the level sits), and the permutation p-value.
+
+    Returns (level_rows_df, factor_rows_df, info_by_factor)."""
+    info = {}
+    for factor in PARAM_FACTORS:
+        labels = sub_meta[factor].values
+        result = fit_lda_factor(X, labels)
+        eta_sum, n_levels = _factor_eta_sum(X, labels)
+        perm = lda_permutation_pvalues(X, labels, n_perm=n_perm)
+        p1 = np.nan
+        if perm is not None:
+            for axis_label, pval in perm:
+                pvalue_rows.append({"stratum": height, "factor": factor,
+                                    "metric": axis_label, "p_value": pval, "n": len(sub_meta)})
+                if axis_label == "LDA1":
+                    p1 = pval
+        if result is None and not (eta_sum == eta_sum):
+            continue
+        sil = _factor_silhouette(X, labels)
+        info[factor] = {"eta_sum": eta_sum, "eta1": (result["eta1"] if result else np.nan),
+                        "n_levels": n_levels, "class_means": (result["class_means"] if result else {}),
+                        "p_value": p1, "silhouette": sil, "result": result}
+    if not info:
+        return pd.DataFrame(), pd.DataFrame(), {}
+
+    total = sum(v["eta_sum"] for v in info.values() if v["eta_sum"] == v["eta_sum"])
+    n_valid = len(info)
+    for v in info.values():
+        v["data_weight"] = (v["eta_sum"] / total) if (total and v["eta_sum"] == v["eta_sum"]) else np.nan
+        v["equal_weight"] = 1.0 / n_valid
+
+    order = sorted(info, key=lambda k: -(info[k]["data_weight"] if info[k]["data_weight"] == info[k]["data_weight"] else -1))
+    frows = []
+    for f in order:
+        v = info[f]
+        frows.append({"height": height, "factor": f, "n_levels": v["n_levels"],
+                      "lda_eigenvalue": v["eta_sum"], "data_weight": v["data_weight"],
+                      "equal_weight": v["equal_weight"], "silhouette": v["silhouette"],
+                      "p_value_lda1": v["p_value"]})
+    fdf = pd.DataFrame(frows)
+    fdf["rank"] = range(1, len(fdf) + 1)
+
+    lrows = []
+    for f in order:
+        v = info[f]
+        for lev, mean in (v["class_means"] or {}).items():
+            lrows.append({"height": height, "factor": f, "level": lev,
+                          "level_canonical_mean": mean, "lda_eigenvalue": v["eta_sum"],
+                          "data_weight": v["data_weight"], "equal_weight": v["equal_weight"],
+                          "silhouette": v["silhouette"], "p_value_lda1": v["p_value"]})
+    ldf = pd.DataFrame(lrows)
+    return ldf, fdf, info
+
+
+def print_factor_leaderboard(fdf, height):
+    print(f"\n{'='*74}\nFACTOR-INFLUENCE LEADERBOARD -- {height.upper()} "
+          f"(weight = normalised summed LDA eigenvalue)\n{'='*74}")
+    print(f"  {'Rk':<3} {'Factor':<8} {'Weight':>7} {'Eigenvalue':>11} {'EqualW':>7} {'Sil':>6} {'p(LDA1)':>8} {'Levels':>7}")
+    print(f"  {'-'*3} {'-'*8} {'-'*7} {'-'*11} {'-'*7} {'-'*6} {'-'*8} {'-'*7}")
+    for _, r in fdf.iterrows():
+        w = f"{r['data_weight']:.3f}" if pd.notna(r["data_weight"]) else "n/a"
+        ev = f"{r['lda_eigenvalue']:.4f}" if pd.notna(r["lda_eigenvalue"]) else "n/a"
+        sil = f"{r['silhouette']:+.2f}" if pd.notna(r.get("silhouette")) else "n/a"
+        p = f"{r['p_value_lda1']:.3f}" if pd.notna(r["p_value_lda1"]) else "n/a"
+        print(f"  {int(r['rank']):<3} {r['factor']:<8} {w:>7} {ev:>11} {r['equal_weight']:>7.3f} {sil:>6} {p:>8} {int(r['n_levels']):>7}")
+    print("  *(Weight = factor's summed LDA eigenvalue / sum across factors -- how strongly it")
+    print("    separates movement. Sil = silhouette of the level clusters in LDA space (higher =")
+    print("    tighter/more separated). p = permutation test on LDA1 separation.)*")
+
+
+def _lda_canonical(X, labels, n_axes=2, ridge=1e-6):
+    """Project X onto the top LDA discriminant axes for `labels` (up to
+    n_classes-1 of them). Returns (canonical [n_used x k], labels_used, k), or
+    (None, None, 0) if the LDA is degenerate for this subset. Same scatter-matrix
+    maths as fit_lda_factor, so the picture matches the reported eigenvalue."""
+    labels = np.asarray(labels, dtype=object)
+    keep = np.array([l is not None and not (isinstance(l, float) and np.isnan(l)) for l in labels])
+    Xv, lv = X[keep], labels[keep]
+    classes = np.unique(lv)
+    n, d = Xv.shape
+    if len(classes) < 2 or n <= d + len(classes):
+        return None, None, 0
+    grand = Xv.mean(axis=0)
+    Sb = np.zeros((d, d)); Sw = np.zeros((d, d))
+    for c in classes:
+        Xc = Xv[lv == c]
+        mc = Xc.mean(axis=0)
+        diff = (mc - grand).reshape(-1, 1)
+        Sb += len(Xc) * (diff @ diff.T)
+        Sw += (Xc - mc).T @ (Xc - mc)
+    Sw += ridge * np.eye(d)
+    try:
+        eigvals, eigvecs = eigh(Sb, Sw)
+    except np.linalg.LinAlgError:
+        return None, None, 0
+    order = np.argsort(eigvals)[::-1]
+    k = min(n_axes, len(classes) - 1)
+    return Xv @ eigvecs[:, order[:k]], lv, k
+
+
+def _factor_silhouette(X, labels):
+    """Silhouette of a factor's level clusters in its LDA discriminant space
+    (how tight/separated the level groups are). Circular by nature -- LDA is fit
+    to maximise this -- so read it as a relative measure across factors, with the
+    permutation p-value as the honest significance test. NaN if degenerate."""
+    can, lv, k = _lda_canonical(X, labels, n_axes=10)
+    if can is None:
+        return np.nan
+    lv = lv.astype(str)
+    uniq, counts = np.unique(lv, return_counts=True)
+    if len(uniq) < 2 or (counts < 2).any() or len(lv) < 3:
+        return np.nan
+    try:
+        return float(silhouette_score(can.reshape(len(can), -1), lv))
+    except Exception:
+        return np.nan
+
+
+def plot_factor_clusters(X, sub_meta, info, verdict, height, out_dir):
+    """2x2 grid, one panel per factor, in THAT factor's LDA discriminant space.
+    Binary -> 1-D strip along LDA1 with level means; 3-level Angle -> LDA1 vs
+    LDA2 scatter. Each level's cluster is annotated with its between-participant
+    dispersion, and the title carries weight / eigenvalue / silhouette / p."""
+    if X.shape[0] < 3 or X.shape[1] < 2:
+        return None
+    rng = np.random.default_rng(0)
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    for ax, factor in zip(axes.ravel(), PARAM_FACTORS):
+        v = info.get(factor, {})
+        wt = v.get("data_weight", np.nan); ev = v.get("eta_sum", np.nan)
+        p = v.get("p_value", np.nan); sil = v.get("silhouette", np.nan)
+        ld = (verdict.get(factor, {}) or {}).get("level_disp", {})
+        title = (f"{factor}   w={wt:.2f}  eig={ev:.3f}  sil={sil:+.2f}  p={p:.3f}"
+                 if wt == wt else f"{factor}   (LDA not estimable)")
+        can, lv, k = _lda_canonical(X, sub_meta[factor].values, n_axes=2)
+        if can is None:
+            ax.text(0.5, 0.5, "LDA not estimable\n(too few events for dims)",
+                    ha="center", va="center", transform=ax.transAxes, fontsize=9)
+            ax.set_title(title, fontsize=10); continue
+        lv_str = lv.astype(str)
+        for lev in [l for l in pd.unique(lv_str) if l != "nan"]:
+            m = lv_str == lev
+            disp = ld.get(lev, np.nan)
+            dtag = f"  (σ={disp:.3f})" if disp == disp else ""
+            if k >= 2:
+                sc = ax.scatter(can[m, 0], can[m, 1], s=20, alpha=0.55, label=f"{lev}{dtag}")
+                cx, cy = can[m, 0].mean(), can[m, 1].mean()
+                ax.scatter(cx, cy, marker="X", s=170, edgecolor="black", linewidth=1.3, zorder=5, color=sc.get_facecolor())
+            else:
+                y = rng.normal(0.0, 0.05, int(m.sum()))
+                sc = ax.scatter(can[m, 0], y, s=20, alpha=0.55, label=f"{lev}{dtag}")
+                ax.axvline(can[m, 0].mean(), color=sc.get_facecolor()[0], linewidth=2.2, alpha=0.85, zorder=5)
+        ax.set_xlabel("LDA1"); ax.set_ylabel("LDA2" if k >= 2 else "(jitter)")
+        if k < 2:
+            ax.set_yticks([])
+        ax.set_title(title, fontsize=10); ax.grid(alpha=0.25); ax.legend(fontsize=8, title="level (σ = between-ppt dispersion)")
+    fig.suptitle(f"Factor separation in LDA discriminant space -- {height}", fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    path = out_dir / f"factor_clusters_{height}.png"
+    fig.savefig(path, dpi=120, bbox_inches="tight"); plt.close(fig)
+    return path
+
+
+def plot_participant_clusters(X, sub_meta, info, verdict, height, out_dir):
+    """2x2 grid, one panel per factor, in that factor's LDA discriminant space.
+    DOTS = participants (coloured by participant, so a single person can be
+    followed); black CROSSES = level centroids (one per option of that factor,
+    labelled with the level name and its between-participant dispersion sigma).
+    Reading how tightly the dots cluster around each level cross -- and whether a
+    participant's dots shift at all between the level crosses -- is the visual of
+    the consistency / 0.001 separation."""
+    if X.shape[0] < 3 or X.shape[1] < 2:
+        return None
+    parts_all = sub_meta["participant"].astype(str).values
+    uparts = sorted(pd.unique(parts_all))
+    cmap = plt.get_cmap("tab20" if len(uparts) > 10 else "tab10")
+    pcolor = {p: cmap(i % cmap.N) for i, p in enumerate(uparts)}
+    rng = np.random.default_rng(0)
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    for ax, factor in zip(axes.ravel(), PARAM_FACTORS):
+        labels = sub_meta[factor].values
+        can, lv, k = _lda_canonical(X, labels, n_axes=2)
+        if can is None:
+            ax.text(0.5, 0.5, "LDA not estimable", ha="center", va="center", transform=ax.transAxes, fontsize=9)
+            ax.set_title(f"{factor}", fontsize=10); continue
+        keep = np.array([l is not None and not (isinstance(l, float) and np.isnan(l)) for l in labels])
+        pk = parts_all[keep]
+        lv_str = lv.astype(str)
+        ld = (verdict.get(factor, {}) or {}).get("level_disp", {})
+        # participant dots
+        yj = rng.normal(0.0, 0.06, len(can)) if k < 2 else None
+        for p in uparts:
+            m = pk == p
+            if not m.any():
+                continue
+            if k >= 2:
+                ax.scatter(can[m, 0], can[m, 1], s=16, alpha=0.5, color=pcolor[p])
+            else:
+                ax.scatter(can[m, 0], yj[m], s=16, alpha=0.5, color=pcolor[p])
+        # black crosses = level centroids (one per option)
+        for lev in [l for l in pd.unique(lv_str) if l != "nan"]:
+            mm = lv_str == lev
+            disp = ld.get(lev, np.nan)
+            lab = f"{lev}" + (f"  (σ={disp:.3f})" if disp == disp else "")
+            cx = can[mm, 0].mean()
+            cy = can[mm, 1].mean() if k >= 2 else 0.0
+            ax.scatter(cx, cy, marker="X", s=230, color="black", edgecolor="white", linewidth=1.5, zorder=6)
+            ax.annotate(lab, (cx, cy), textcoords="offset points",
+                        xytext=(6, 8) if k >= 2 else (0, 12), ha="left" if k >= 2 else "center",
+                        fontsize=8, fontweight="bold", zorder=7)
+        ax.set_xlabel("LDA1"); ax.set_ylabel("LDA2" if k >= 2 else "(jitter)")
+        if k < 2:
+            ax.set_yticks([])
+        ax.set_title(f"{factor}", fontsize=10); ax.grid(alpha=0.25)
+    handles = [plt.Line2D([0], [0], marker="o", ls="", color=pcolor[p], label=p) for p in uparts]
+    fig.legend(handles=handles, loc="lower center", ncol=min(len(uparts), 8), fontsize=8,
+               title="participant (dot)   |   black X = level centroid (σ = between-participant dispersion)")
+    fig.suptitle(f"Participants (dots) vs level centroids (X) in LDA space -- {height}", fontsize=12)
+    fig.tight_layout(rect=[0, 0.06, 1, 0.97])
+    path = out_dir / f"participants_{height}.png"
+    fig.savefig(path, dpi=120, bbox_inches="tight"); plt.close(fig)
+    return path
+
+
+def plot_participant_drift(X, sub_meta, info, verdict, height, out_dir):
+    """Option C: per-participant DRIFT across the levels of each factor. In each
+    panel (one factor) the x-axis is the factor's levels and the y-axis is that
+    participant's mean LDA1 centroid at each level; one line per participant. A
+    steep line = the factor moves that person a lot; a flat line = it barely does.
+    The vertical spread of the lines at each level IS the between-participant
+    dispersion (sigma), so: lines piled flat and together = the consistency
+    collapse (no drift, no spread); steep and parallel = a strong, consistent
+    effect; steep but crossing = strong but inconsistent."""
+    if X.shape[0] < 3 or X.shape[1] < 2:
+        return None
+    parts_all = sub_meta["participant"].astype(str).values
+    uparts = sorted(pd.unique(parts_all))
+    cmap = plt.get_cmap("tab20" if len(uparts) > 10 else "tab10")
+    pcolor = {p: cmap(i % cmap.N) for i, p in enumerate(uparts)}
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    for ax, factor in zip(axes.ravel(), PARAM_FACTORS):
+        labels = sub_meta[factor].values
+        can, lv, k = _lda_canonical(X, labels, n_axes=1)   # LDA1 carries the slope
+        v = info.get(factor, {})
+        wt = v.get("data_weight", np.nan); ev = v.get("eta_sum", np.nan); p = v.get("p_value", np.nan)
+        title = (f"{factor}   w={wt:.2f}  eig={ev:.3f}  p={p:.3f}"
+                 if wt == wt else f"{factor}   (LDA not estimable)")
+        if can is None:
+            ax.text(0.5, 0.5, "LDA not estimable", ha="center", va="center", transform=ax.transAxes, fontsize=9)
+            ax.set_title(title, fontsize=10); continue
+        keep = np.array([l is not None and not (isinstance(l, float) and np.isnan(l)) for l in labels])
+        pk = parts_all[keep]
+        lv_str = lv.astype(str)
+        levs = [l for l in pd.unique(lv_str) if l != "nan"]
+        try:
+            levs = sorted(levs, key=lambda s: float(s))
+        except ValueError:
+            levs = sorted(levs)
+        xpos = {lev: i for i, lev in enumerate(levs)}
+        for pp in uparts:
+            xs, ys = [], []
+            for lev in levs:
+                mm = (pk == pp) & (lv_str == lev)
+                if mm.any():
+                    xs.append(xpos[lev]); ys.append(float(can[mm, 0].mean()))
+            if xs:
+                ax.plot(xs, ys, "-o", color=pcolor[pp], alpha=0.75, ms=5, linewidth=1.4)
+        ld = (verdict.get(factor, {}) or {}).get("level_disp_lda1", {})
+        ax.set_xticks(range(len(levs)))
+        ax.set_xticklabels([f"{lev}\nσ={ld[lev]:.3f}" if ld.get(lev) == ld.get(lev) else lev for lev in levs], fontsize=8)
+        ax.set_xlim(-0.3, len(levs) - 0.7)
+        ax.set_xlabel(f"{factor} level"); ax.set_ylabel("LDA1 centroid (per participant)")
+        ax.set_title(title, fontsize=10); ax.grid(axis="y", alpha=0.25)
+    handles = [plt.Line2D([0], [0], marker="o", color=pcolor[p], label=p) for p in uparts]
+    fig.legend(handles=handles, loc="lower center", ncol=min(len(uparts), 8), fontsize=8,
+               title="participant (one line = one participant's drift across levels)")
+    fig.suptitle(f"Per-participant drift across factor levels (LDA1) -- {height}", fontsize=12)
+    fig.tight_layout(rect=[0, 0.06, 1, 0.97])
+    path = out_dir / f"participant_drift_{height}.png"
+    fig.savefig(path, dpi=120, bbox_inches="tight"); plt.close(fig)
+    return path
+
+
+
+def recommend_consistency(X, sub_meta, info, height, min_participants=2, n_perm=200, alpha=0.05):
+    """Per-height recommendation by CONSISTENCY (between-participant convergence),
+    synthesised one factor at a time -- measured IN THAT FACTOR'S LDA DISCRIMINANT
+    SPACE (the same projection the drift plot shows), NOT the block-normalised
+    feature blocks. The normalised blocks divide every domain down to the same
+    tiny eigenvalue-mass scale, which collapses every dispersion to ~0.001; the
+    LDA axes are un-normalised and point along the direction the factor actually
+    moves people, so the dispersion there matches the spread you can see by eye.
+
+    For each factor, project events onto its LDA axes, then per level take each
+    participant's centroid in that projection and measure the between-participant
+    spread (RMS distance from the level centroid). Two versions are reported:
+      - dispersion_lda1  : spread along LDA1 only (exactly the drift plot).
+      - dispersion_full  : spread across all n_levels-1 axes (so 3-level Angle's
+                           second discriminant axis is included).
+    The most CONSISTENT level (lowest dispersion_full) is recommended per factor;
+    winners combine into a config. Every participant sees every level (within-
+    subject), so each estimate uses the full pool.
+
+    CAVEAT: a participant's per-level centroid still pools over the other three
+    factors, so a level's dispersion carries some of that; the balanced design
+    largely averages it out. And 'most consistent' != 'best ergonomics' -- that
+    equivalence is the calibration-free assumption, read alongside the eigenvalue
+    weight (a tightly-agreed level of a low-weight factor barely matters)."""
+    participants = sub_meta["participant"].values
+    rows, verdict = [], {}
+    for factor in PARAM_FACTORS:
+        if factor not in sub_meta.columns:
+            continue
+        labels = sub_meta[factor].values
+        can1, _, _ = _lda_canonical(X, labels, n_axes=1)
+        canF, _, _ = _lda_canonical(X, labels, n_axes=10)
+        keep = np.array([l is not None and not (isinstance(l, float) and np.isnan(l)) for l in labels])
+        pk = participants[keep]
+        lv_str = np.asarray(sub_meta[factor].astype(str).values)[keep]
+
+        def spread(can, mask, pc, uniq):
+            cents = np.array([can[mask][pc == p].mean(axis=0) for p in uniq])
+            grand = cents.mean(axis=0)
+            return float(np.sqrt(np.mean(np.sum((cents - grand) ** 2, axis=1))))
+
+        level_d1, level_df = {}, {}
+        for lev in [l for l in pd.unique(lv_str) if l != "nan"]:
+            lev_mask = lv_str == lev
+            pc = pk[lev_mask]
+            uniq = pd.unique(pc)
+            if can1 is None or len(uniq) < min_participants:
+                level_d1[lev] = level_df[lev] = np.nan
+                rows.append({"height": height, "factor": factor, "level": lev,
+                             "dispersion_lda1": np.nan, "dispersion_full": np.nan,
+                             "n_participants": len(uniq)})
+                continue
+            d1 = spread(can1, lev_mask, pc, uniq)
+            df_ = spread(canF, lev_mask, pc, uniq) if canF is not None else d1
+            level_d1[lev] = d1; level_df[lev] = df_
+            rows.append({"height": height, "factor": factor, "level": lev,
+                         "dispersion_lda1": d1, "dispersion_full": df_,
+                         "n_participants": len(uniq)})
+        valid = {k: v for k, v in level_df.items() if v == v}
+        best = min(valid, key=valid.get) if valid else None
+
+        # within-participant permutation test on the best-minus-worst full-LDA
+        # dispersion gap (fixed LDA projection; shuffle level labels within each
+        # participant). p < alpha => the levels really differ in convergence.
+        def gap_from(lv_arr):
+            ds = []
+            for lv in [l for l in pd.unique(lv_arr) if l != "nan"]:
+                mm = lv_arr == lv
+                pc2 = pk[mm]; u2 = pd.unique(pc2)
+                if canF is None or len(u2) < min_participants:
+                    continue
+                ds.append(spread(canF, mm, pc2, u2))
+            return (max(ds) - min(ds)) if len(ds) >= 2 else np.nan
+
+        pval = np.nan
+        obs_gap = gap_from(lv_str)
+        if best is not None and obs_gap == obs_gap:
+            rng = np.random.default_rng(0)
+            idx_by_p = [np.where(pk == pp)[0] for pp in pd.unique(pk)]
+            ge = vv = 0
+            for _ in range(n_perm):
+                perm = lv_str.copy()
+                for idx in idx_by_p:
+                    perm[idx] = rng.permutation(lv_str[idx])
+                g = gap_from(perm)
+                if g == g:
+                    vv += 1
+                    if g >= obs_gap - 1e-12:
+                        ge += 1
+            pval = (ge + 1) / (vv + 1) if vv else np.nan
+        sig = bool(pval == pval and pval < alpha)
+        verdict[factor] = {"winner": best if sig else None, "best_level": best,
+                           "level_disp": level_df, "level_disp_lda1": level_d1,
+                           "p_value": pval, "significant": sig,
+                           "weight": info.get(factor, {}).get("data_weight", np.nan)}
+        for r in rows:
+            if r["factor"] == factor:
+                r.setdefault("p_value", pval)
+                r.setdefault("significant", sig)
+
+    synth = "_".join((verdict.get(f, {}).get("winner") or "?") for f in PARAM_FACTORS)
+    return pd.DataFrame(rows), verdict, synth
+
+
+def print_consistency_recommendation(verdict, synth, height):
+    print(f"\n  RECOMMENDATION (consistency, measured in LDA space) -- {height}: {synth}")
+    for f in PARAM_FACTORS:
+        v = verdict.get(f, {})
+        if not v or v.get("best_level") is None:
+            print(f"      {f:<8}: no verdict (insufficient participants per level)")
+            continue
+        ordered = sorted(v["level_disp"].items(), key=lambda x: (x[1] if x[1] == x[1] else 9e99))
+        ds = ", ".join(f"{lv}={d:.3f}" for lv, d in ordered)
+        wt = v.get("weight", np.nan); pval = v.get("p_value", np.nan)
+        wts = f"{wt:.2f}" if wt == wt else "n/a"
+        ptxt = f"p={pval:.3f}" if pval == pval else "p=n/a"
+        if v.get("significant"):
+            print(f"      {f:<8}: {v['winner']:<14} weight={wts}  {ptxt}  [disp(full LDA) {ds}]")
+        else:
+            print(f"      {f:<8}: (n.s.) best={v['best_level']:<9} weight={wts}  {ptxt}  [disp {ds}]  -> no winner")
+
 
 def add_prototype_label(meta: pd.DataFrame) -> pd.DataFrame:
     meta = meta.copy()
@@ -723,78 +1197,10 @@ def add_prototype_label(meta: pd.DataFrame) -> pd.DataFrame:
     return meta
 
 
-def build_deviation_table(ids, lda_results):
-    """For every event id (in the same order as `ids`), and every factor with
-    a valid LDA fit, compute a 0-100 desirability score: 100 = that event's
-    canonical score is closest to 0 (the grand mean) among events in this
-    height stratum; 0 = furthest. NaN where the event had no usable label for
-    that factor. Returns a DataFrame indexed positionally to match `ids`."""
-    n = len(ids)
-    id_pos = {eid: i for i, eid in enumerate(ids)}
-    data = {}
-    for factor, result in lda_results.items():
-        col = np.full(n, np.nan)
-        if result is not None:
-            dev = np.abs(result["canonical"])
-            v_min, v_max = dev.min(), dev.max()
-            desirability = (np.full(len(dev), 100.0) if (v_max - v_min) < 1e-9
-                            else 100.0 * (v_max - dev) / (v_max - v_min))
-            # result['used_index'] are positions into the sub_meta/ids array
-            # passed to fit_lda_factor, in the same order as `ids`.
-            for pos, orig_pos in enumerate(result["used_index"]):
-                col[orig_pos] = desirability[pos]
-        data[f"{factor}_score"] = col
-    return pd.DataFrame(data)
 
 
-def weighted_mean_ignore_nan(row, weights):
-    """Weighted average over available (non-NaN) factor scores only, with
-    weights renormalised over whichever factors are actually present for this
-    event -- an event missing one factor's label still gets a meaningful
-    Grand_Score from the factors it does have, rather than being silently
-    dragged down by a zero-fill."""
-    vals, ws = [], []
-    for f, w in weights.items():
-        v = row.get(f"{f}_score")
-        if v is not None and not (isinstance(v, float) and np.isnan(v)):
-            vals.append(v)
-            ws.append(w)
-    if not ws:
-        return np.nan
-    vals, ws = np.array(vals), np.array(ws)
-    return float(np.sum(vals * ws) / np.sum(ws))
 
 
-def score_and_rank_lda(dev_df, sub_meta, weights):
-    """Two-stage aggregation mirroring rank_prototypes.py's score_and_rank:
-    event -> (Prototype_Config, participant) mean -> Prototype_Config mean.
-    This prevents a participant who happened to contribute more place events
-    to a given config from pulling its score toward their own results."""
-    df = dev_df.copy()
-    df["participant"] = sub_meta["participant"].values
-    df["Prototype_Config"] = sub_meta["Prototype_Config"].values
-    df["Grand_Score"] = df.apply(lambda r: weighted_mean_ignore_nan(r, weights), axis=1)
-    factor_cols = [f"{f}_score" for f in weights]
-
-    stage1 = df.groupby(["Prototype_Config", "participant"], dropna=False).agg(
-        Grand_Score=("Grand_Score", "mean"),
-        N_Events=("Grand_Score", "size"),
-        **{c: (c, "mean") for c in factor_cols},
-    ).reset_index()
-
-    stage2 = stage1.groupby("Prototype_Config", dropna=False).agg(
-        Grand_Score=("Grand_Score", "mean"),
-        Score_SD=("Grand_Score", lambda x: float(x.std(ddof=1)) if len(x) > 1 else 0.0),
-        N_Participants=("participant", "nunique"),
-        N_Events=("N_Events", "sum"),
-        **{c: (c, "mean") for c in factor_cols},
-    ).reset_index()
-
-    stage2 = stage2.sort_values("Grand_Score", ascending=False).reset_index(drop=True)
-    stage2["Rank"] = stage2.index + 1
-    cols = ["Rank", "Prototype_Config", "Grand_Score", "Score_SD",
-            "N_Participants", "N_Events"] + factor_cols
-    return stage2[cols]
 
 
 def print_pvalue_matrix(pvalue_df, strata):
@@ -837,42 +1243,14 @@ def print_pvalue_matrix(pvalue_df, strata):
           "per discriminant axis, within height stratum)")
 
 
-def print_ascii_leaderboard(rankings, title, top_n=10):
-    """Verbatim layout of rank_prototypes.py's print_ascii_leaderboard so the
-    two scripts' leaderboards are directly comparable side by side. The
-    post-bar columns here are the four prototype-factor distance-from-mean
-    scores (Length/Size/Weight/Angle), occupying the same slot rank_prototypes
-    uses for its ergonomic domains."""
-    print(f"\n{'='*80}\n{title}\n{'='*80}")
-    domains = [c for c in rankings.columns
-               if c not in ("Rank", "Prototype_Config", "Grand_Score",
-                            "Score_SD", "N_Participants", "N_Events")]
-    domain_headers = "  ".join([f"{d.replace('_score',''):>10}" for d in domains])
-
-    print(f" {'Rk':<3} {'Prototype Configuration':<32} {'Grand':>6} {'(SD)':>6} {'Np':>3} {'Ne':>4} | {domain_headers}")
-    print(f" {'-'*3} {'-'*32} {'-'*6} {'-'*6} {'-'*3} {'-'*4}-+-{'-'*len(domain_headers)}")
-
-    for _, r in rankings.head(top_n).iterrows():
-        domain_vals = "  ".join([f"{r[d]:>10.1f}" if pd.notna(r[d]) else f"{'n/a':>10}" for d in domains])
-        np_val = r.get("N_Participants", np.nan)
-        np_str = f"{int(np_val):>3}" if pd.notna(np_val) else "  ?"
-        print(f" {int(r['Rank']):<3} {r['Prototype_Config']:<32} {r['Grand_Score']:>6.1f} ({r['Score_SD']:>4.1f}) {np_str} {int(r['N_Events']):>4} | {domain_vals}")
-
-    if len(rankings) > top_n:
-        print(f" ... and {len(rankings) - top_n} more configurations.")
-    print(f" *(Scores 0-100; Np = distinct participants contributing to this config -- typically 2-4")
-    print(f"   of 10, given the incomplete-block allocation. Individual config ranks therefore rest on")
-    print(f"   substantially weaker evidence than the factor-level verdicts above.)*")
 
 
-# ============================================================================
-# 11. Extraction cache (avoids re-walking/re-parsing raw trial CSVs on every
-# run -- mirrors evaluate_difference.py's extract/compare split). The costly
-# step is collect_events(): reading every trial's labelled CSVs, computing
-# every joint-angle curve, and resampling to the grid. Registration/fPCA/LDA/
-# ranking are comparatively cheap and depend on CLI parameters, so only the
-# pre-registration per-event curves + metadata are cached.
-# ============================================================================
+
+
+
+
+
+
 
 def cache_paths(cache_dir: Path):
     return cache_dir / "meta.csv", cache_dir / "curves.npz", cache_dir / "cache_info.csv"
@@ -960,6 +1338,12 @@ def main():
                     help="Permutations for the LDA separation p-value test (default 1000)")
     ap.add_argument("--cache-dir", type=Path, default=None,
                     help="Cache dir (default: <landmarks-root>/metrics/fpca_cache)")
+    ap.add_argument("--no-zfilt", action="store_true",
+                    help="Use raw *_body.csv even when *_body_zfilt.csv exist (extract only)")
+    ap.add_argument("--no-exclude", action="store_true",
+                    help="Keep events even if in the cleaning manifest (extract only)")
+    ap.add_argument("--exclude-csv", type=Path, default=None,
+                    help="excluded_place_events.csv (default <root>/metrics/cleaning/excluded_place_events.csv)")
     args = ap.parse_args()
 
     if not args.landmarks_root.is_dir():
@@ -974,8 +1358,15 @@ def main():
     if args.mode in ("extract", "all"):
         n_grid = args.n_grid or 100
         pfilter = parse_participant_filter(args.participants)
+        global USE_ZFILT
+        USE_ZFILT = not args.no_zfilt
+        exclude_keys = set()
+        if not args.no_exclude:
+            exclude_csv = args.exclude_csv or (args.landmarks_root / "metrics" / "cleaning" / "excluded_place_events.csv")
+            exclude_keys = load_excluded_events(exclude_csv)
         print(f"{'='*70}\nCOLLECTING PLACE EVENTS (extract)\n{'='*70}")
-        meta, event_data = collect_events(args.landmarks_root, pfilter, n_grid)
+        print(f"  body source: {'median-filtered (_zfilt) when present' if USE_ZFILT else 'raw (_zfilt disabled)'}")
+        meta, event_data = collect_events(args.landmarks_root, pfilter, n_grid, exclude_keys=exclude_keys)
         if meta.empty:
             sys.exit("No Place events collected.")
         meta = add_prototype_label(meta)
@@ -993,8 +1384,9 @@ def main():
         print("Per height:", meta["height"].value_counts().to_dict())
 
     fpca_summary_rows = []
-    ranking_tables = {}
-    leaderboards = {}
+    factor_level_rows = []
+    factor_weight_rows = []
+    recommendation_rows = []
     pvalue_rows = []
 
     for height in HEIGHTS:
@@ -1040,67 +1432,42 @@ def main():
             print(f"  Skipping LDA for {height} -- fewer than 2 usable domains.")
             continue
 
-        print("\n  [OUTLIER DETECTION] Scanning fPCA space for extreme kinematic anomalies (Z > 3.0)...")
-        sub_meta = meta.loc[ids]
-        
-        for domain, scores in block_scores.items():
-            # Calculate absolute Z-score for every event on every component
-            z_scores = np.abs(scores) / np.std(scores, axis=0)
-            
-            # Find row indices where ANY component exceeds 3 standard deviations
-            glitch_indices = np.where(np.any(z_scores > 3.0, axis=1))[0]
-            
-            if len(glitch_indices) > 0:
-                print(f"    -> {domain.upper()} domain: {len(glitch_indices)} anomaly(s) flagged.")
-                for idx in glitch_indices:
-                    eid = ids[idx]
-                    row = sub_meta.loc[eid]
-                    # Find which specific fPCA component triggered the flag
-                    max_comp = np.argmax(z_scores[idx]) 
-                    max_z = z_scores[idx, max_comp]
-                    print(f"       {row['participant']} | Trial: {row['trial']} | "
-                          f"PC{max_comp+1} Z-Score: {max_z:.1f}")
-            else:
-                print(f"    -> {domain.upper()} domain: Clean (no Z > 3 anomalies).")
-        print("  " + "-"*68)
-
         normalised = {d: normalise_block(block_scores[d], block_eigs[d]) for d in block_scores}
         X = np.hstack([normalised[d] for d in sorted(normalised)])
         print(f"  Combined feature vector: {X.shape[1]} dims "
               f"({', '.join(f'{d}:{normalised[d].shape[1]}' for d in sorted(normalised))})")
 
         sub_meta = meta.loc[ids]
-        lda_results = {}
-        for factor in PARAM_FACTORS:
-            result = fit_lda_factor(X, sub_meta[factor].values)
-            lda_results[factor] = result
-            if result is None:
-                print(f"  [LDA:{factor}] skipped (insufficient levels/samples).")
-            else:
-                print(f"  [LDA:{factor}] eta1={result['eta1']:.4f}, classes={result['classes']}")
-            # Permutation p-value per discriminant axis (LDA1, LDA2, ...)
-            perm = lda_permutation_pvalues(X, sub_meta[factor].values, n_perm=args.n_perm)
-            if perm is not None:
-                for axis_label, pval in perm:
-                    pvalue_rows.append({"stratum": height, "factor": factor,
-                                        "metric": axis_label, "p_value": pval,
-                                        "n": len(ids)})
 
-        ranking_df, weights = build_ranking(lda_results)
-        if ranking_df is not None:
-            ranking_tables[height] = ranking_df
-            print("\n  Factor weights (fixed vs data-driven):")
-            for f in weights["fixed"]:
-                print(f"    {f:8s}  fixed={weights['fixed'][f]:.3f}  "
-                      f"data-driven={weights['data_driven'][f]:.3f}")
+        # --- FACTOR-INFLUENCE leaderboard: LDA per factor, ranked by data-driven
+        #     weight = normalised summed LDA eigenvalue; permutation p-value for
+        #     significance; 2x2 cluster plot as the visual. (Replaces the old
+        #     desirability/distance-from-mean config leaderboard.) ---
+        ldf, fdf, info = build_factor_leaderboard(X, sub_meta, height, args.n_perm, pvalue_rows)
+        if fdf.empty:
+            print(f"  No estimable LDA separation for any factor in {height}.")
+        else:
+            print_factor_leaderboard(fdf, height)
+            factor_level_rows.append(ldf)
+            factor_weight_rows.append(fdf)
 
-            dev_df = build_deviation_table(ids, lda_results)
-            for scheme_name, scheme_weights in weights.items():
-                lb = score_and_rank_lda(dev_df, sub_meta, scheme_weights)
-                leaderboards[(height, scheme_name)] = lb
-                title = f"PROTOTYPE LEADERBOARD -- {height.upper()} ({scheme_name.replace('_',' ').upper()} WEIGHTS)"
-                print_ascii_leaderboard(lb, title, top_n=10)
-                lb.to_csv(out_dir / f"leaderboard_{height}_{scheme_name}.csv", index=False)
+            # Per-height recommendation by CONSISTENCY: per factor, the level with
+            # the lowest between-participant dispersion (most convergent), combined
+            # into a config; each factor's LDA eigenvalue weight shown alongside.
+            rec_rows, rec_verdict, synth = recommend_consistency(X, sub_meta, info, height, n_perm=args.n_perm)
+            if not rec_rows.empty:
+                print_consistency_recommendation(rec_verdict, synth, height)
+                recommendation_rows.append(rec_rows.assign(recommended_config=synth))
+
+            png = plot_factor_clusters(X, sub_meta, info, rec_verdict, height, out_dir)
+            if png:
+                print(f"  Wrote {png}")
+            png_p = plot_participant_clusters(X, sub_meta, info, rec_verdict, height, out_dir)
+            if png_p:
+                print(f"  Wrote {png_p}")
+            png_d = plot_participant_drift(X, sub_meta, info, rec_verdict, height, out_dir)
+            if png_d:
+                print(f"  Wrote {png_d}")
 
     # --- outputs ---
     if pvalue_rows:
@@ -1113,11 +1480,21 @@ def main():
 
     pd.DataFrame(fpca_summary_rows).to_csv(out_dir / "domain_fpca_summary.csv", index=False)
     print(f"Wrote {out_dir / 'domain_fpca_summary.csv'}")
-    if ranking_tables:
-        allr = pd.concat([df.assign(height=h) for h, df in ranking_tables.items()],
-                         ignore_index=True)
-        allr.to_csv(out_dir / "lda_factor_scores.csv", index=False)
-        print(f"Wrote {out_dir / 'lda_factor_scores.csv'}")
+    if factor_weight_rows:
+        pd.concat(factor_weight_rows, ignore_index=True).to_csv(out_dir / "lda_factor_weights.csv", index=False)
+        print(f"Wrote {out_dir / 'lda_factor_weights.csv'}")
+    if factor_level_rows:
+        pd.concat(factor_level_rows, ignore_index=True).to_csv(out_dir / "lda_factor_leaderboard.csv", index=False)
+        print(f"Wrote {out_dir / 'lda_factor_leaderboard.csv'}")
+    if recommendation_rows:
+        allrec = pd.concat(recommendation_rows, ignore_index=True)
+        allrec.to_csv(out_dir / "recommended_config_by_height.csv", index=False)
+        print(f"Wrote {out_dir / 'recommended_config_by_height.csv'}")
+        print(f"\n{'='*64}\nRECOMMENDED CONFIG PER HEIGHT (consistency-synthesised)\n{'='*64}")
+        for h in HEIGHTS:
+            sub = allrec[allrec["height"] == h]
+            if not sub.empty:
+                print(f"  {h:<7}: {sub['recommended_config'].iloc[0]}")
     meta.to_csv(out_dir / "place_events_meta.csv", index=False)
     print(f"Wrote {out_dir / 'place_events_meta.csv'}")
     print("\nDone.")

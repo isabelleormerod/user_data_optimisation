@@ -35,8 +35,8 @@ from pathlib import Path
 
 # Import the two pipeline modules (both must be alongside this script)
 sys.path.insert(0, str(Path(__file__).parent))
-import sync_to_pen_time  # noqa: E402
-import convert_boris_to_synced_time as convert_boris  # noqa: E402
+import preprocessing.sync_to_pen_time as sync_to_pen_time  # noqa: E402
+import preprocessing.convert_boris_to_synced_time as convert_boris  # noqa: E402
 from utils.params import participant_of  # noqa: E402
 
 
