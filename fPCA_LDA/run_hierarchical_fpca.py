@@ -16,8 +16,29 @@ detecting Place events on the fly -- no separate extraction step or manifest.
     to a variance-explained threshold (default 90%).
 
   Block normalisation: each domain's retained component scores are divided
-    by that domain's total retained eigenvalue mass, so no domain dominates
-    the combined feature vector purely by having more components.
+    by that domain's total retained eigenvalue mass. NOTE: Fisher's LDA is
+    invariant to rescaling its input features, so this step does not change the
+    LDA factor weights or the consistency results (verified by rescaling blocks
+    by x10 and x0.05: identical output). A domain's influence on the LDA is set
+    by how many components it contributes, not by its scale.
+
+  Optional timing block (--timing-block): registration separates WHEN things
+    happen from the SHAPE of the movement, so that timing does not distort the
+    posture components. The timing information is not discarded: with this flag
+    it is added as its own block -- the log of each event's duration plus the
+    leading fPCA components of its time-warping function (gamma_i(t) - t),
+    --n-components-timing of them (default 3). This mirrors the MCDA pipeline,
+    where task duration is one explicit metric. Outputs then go to
+    fpca_results_timing/ (unless --out is given), so runs with and without the
+    block can be compared directly.
+
+  Registration is OFF by default: the final analysis uses resampled curves
+    without time alignment (registration was tested and did not substantially
+    change the results). --registration switches the elastic (SRVF) alignment
+    back on as a robustness check; outputs then go to fpca_results_reg/ (or
+    fpca_results_reg_timing/ with --timing-block). Without registration, the
+    timing block holds log duration only, since there is no time-warping to
+    summarise. (--no-registration is still accepted and has no effect.)
 
   Stage 2 (LDA per factor): Fisher's linear discriminant fitted separately
     for each design factor (Length, Size, Weight, Angle) within each height
@@ -34,6 +55,22 @@ detecting Place events on the fly -- no separate extraction step or manifest.
     2x2 PCA scatter (one panel per factor, coloured by level) visualises the
     clustering. The earlier desirability / distance-from-mean config leaderboard
     has been removed in favour of this.
+
+  Thesis outputs (same layout as 05_rank_prototypes.py, for direct comparison):
+    lda_factor_importance.pdf/.png  factor weights (0-1) grouped by working
+                                    height, one bar per factor, same colours
+    lda_consistency_table.tex       consistency results with workstations side
+                                    by side, one row per factor level
+    lda_weighted_config_ranking.csv all 24 configurations per height, ranked by a
+                                    weighted consistency score (see
+                                    weighted_config_ranking)
+    lda_stage1_separation_<height>.pdf/.png
+                                    per height, one panel per parameter: how far
+                                    apart the settings are (event distributions)
+    lda_stage2_consistency_<height>.pdf/.png
+                                    per height, one panel per parameter: agreement
+                                    between participants (participant means with
+                                    the dispersion sigma)
 
 DISCOVERY (matches evaluate_difference.py):
   Walks <root>/<PID>/<trial>/, finds the labelled pen file
@@ -55,10 +92,10 @@ likely to iterate on.
   --mode all      : both, in one run.
 
 USAGE:
-    python run_hierarchical_fpca.py --mode extract --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
-    python run_hierarchical_fpca.py --mode compare --landmarks-root ...
-    python run_hierarchical_fpca.py --mode all --landmarks-root ... --participants P002,P003
-    python run_hierarchical_fpca.py --mode compare --landmarks-root ... --n-components-hand 5 --n-components-body 2
+    python fPCA_LDA/run_hierarchical_fpca.py --mode compare --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
+    python fPCA_LDA/run_hierarchical_fpca.py --mode compare --landmarks-root ...
+    python fPCA_LDA/run_hierarchical_fpca.py --mode all --landmarks-root ... --participants P002,P003
+    python fPCA_LDA/run_hierarchical_fpca.py --mode compare --landmarks-root ... --n-components-hand 5 --n-components-body 2
 
 NOTES / ASSUMPTIONS TO VERIFY:
   - Pen orientation angles (perpendicularity, up/down, left/right) are derived
@@ -110,6 +147,16 @@ PARAM_FACTORS = ["Length", "Size", "Weight", "Angle"]
 HEIGHTS = ["High", "Medium", "Low"]
 VALID_HEIGHTS = ["High", "Medium", "Low"]    # the only height strata ever analysed
 USE_ZFILT = True   # set from --no-zfilt in main(); redirects body reads to *_body_zfilt.csv
+
+# Thesis figure/table conventions, shared with 05_rank_prototypes.py so the two
+# approaches' outputs look identical and can be compared directly.
+FIG_FACTORS = ["Angle", "Size", "Length", "Weight"]      # display order
+FACTOR_COLOURS = {"Angle": "#c8642a", "Size": "#3b6ea5", "Length": "#3e8e5e", "Weight": "#7d4e9e"}
+LEVEL_ORDER = {"Length": ["Short", "Long"], "Size": ["Small", "Large"],
+               "Weight": ["Not_weighted", "Front_weighted"], "Angle": ["A90", "A135", "A180"]}
+TEX_LEVEL = {"Short": "Short", "Long": "Long", "Small": "Small", "Large": "Large",
+             "Not_weighted": "Non-weighted", "Front_weighted": "Weighted",
+             "A90": r"90\textdegree", "A135": r"135\textdegree", "A180": r"180\textdegree"}
 
 # Number of fPCA components each domain is compressed to. Per-domain (not one
 # shared value) so hand/body/pen -- which differ a lot in raw dimensionality
@@ -577,9 +624,10 @@ def register_stratum(event_ids, event_data, n_grid):
     obj.srsf_align(parallel=False, MaxItr=15, verbose=False)
     gam = obj.gam
 
-    registered = {}
+    registered, warps = {}, {}
     for i, eid in enumerate(event_ids):
         gam_i = gam[:, i]
+        warps[eid] = np.asarray(gam_i, dtype=float)
         reg = {}
         for key, curve in event_data[eid]["curves"].items():
             if np.isnan(curve).all():
@@ -589,7 +637,7 @@ def register_stratum(event_ids, event_data, n_grid):
                                fill_value=(curve[0], curve[-1]))
             reg[key] = interp(gam_i)
         registered[eid] = reg
-    return registered
+    return registered, warps
 
 
 # ============================================================================
@@ -900,51 +948,6 @@ def _factor_silhouette(X, labels):
         return np.nan
 
 
-def plot_factor_clusters(X, sub_meta, info, verdict, height, out_dir):
-    """2x2 grid, one panel per factor, in THAT factor's LDA discriminant space.
-    Binary -> 1-D strip along LDA1 with level means; 3-level Angle -> LDA1 vs
-    LDA2 scatter. Each level's cluster is annotated with its between-participant
-    dispersion, and the title carries weight / eigenvalue / silhouette / p."""
-    if X.shape[0] < 3 or X.shape[1] < 2:
-        return None
-    rng = np.random.default_rng(0)
-    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
-    for ax, factor in zip(axes.ravel(), PARAM_FACTORS):
-        v = info.get(factor, {})
-        wt = v.get("data_weight", np.nan); ev = v.get("eta_sum", np.nan)
-        p = v.get("p_value", np.nan); sil = v.get("silhouette", np.nan)
-        ld = (verdict.get(factor, {}) or {}).get("level_disp", {})
-        title = (f"{factor}   w={wt:.2f}  eig={ev:.3f}  sil={sil:+.2f}  p={p:.3f}"
-                 if wt == wt else f"{factor}   (LDA not estimable)")
-        can, lv, k = _lda_canonical(X, sub_meta[factor].values, n_axes=2)
-        if can is None:
-            ax.text(0.5, 0.5, "LDA not estimable\n(too few events for dims)",
-                    ha="center", va="center", transform=ax.transAxes, fontsize=9)
-            ax.set_title(title, fontsize=10); continue
-        lv_str = lv.astype(str)
-        for lev in [l for l in pd.unique(lv_str) if l != "nan"]:
-            m = lv_str == lev
-            disp = ld.get(lev, np.nan)
-            dtag = f"  (σ={disp:.3f})" if disp == disp else ""
-            if k >= 2:
-                sc = ax.scatter(can[m, 0], can[m, 1], s=20, alpha=0.55, label=f"{lev}{dtag}")
-                cx, cy = can[m, 0].mean(), can[m, 1].mean()
-                ax.scatter(cx, cy, marker="X", s=170, edgecolor="black", linewidth=1.3, zorder=5, color=sc.get_facecolor())
-            else:
-                y = rng.normal(0.0, 0.05, int(m.sum()))
-                sc = ax.scatter(can[m, 0], y, s=20, alpha=0.55, label=f"{lev}{dtag}")
-                ax.axvline(can[m, 0].mean(), color=sc.get_facecolor()[0], linewidth=2.2, alpha=0.85, zorder=5)
-        ax.set_xlabel("LDA1"); ax.set_ylabel("LDA2" if k >= 2 else "(jitter)")
-        if k < 2:
-            ax.set_yticks([])
-        ax.set_title(title, fontsize=10); ax.grid(alpha=0.25); ax.legend(fontsize=8, title="level (σ = between-ppt dispersion)")
-    fig.suptitle(f"Factor separation in LDA discriminant space -- {height}", fontsize=12)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    path = out_dir / f"factor_clusters_{height}.png"
-    fig.savefig(path, dpi=120, bbox_inches="tight"); plt.close(fig)
-    return path
-
-
 def plot_participant_clusters(X, sub_meta, info, verdict, height, out_dir):
     """2x2 grid, one panel per factor, in that factor's LDA discriminant space.
     DOTS = participants (coloured by participant, so a single person can be
@@ -992,7 +995,7 @@ def plot_participant_clusters(X, sub_meta, info, verdict, height, out_dir):
             ax.annotate(lab, (cx, cy), textcoords="offset points",
                         xytext=(6, 8) if k >= 2 else (0, 12), ha="left" if k >= 2 else "center",
                         fontsize=8, fontweight="bold", zorder=7)
-        ax.set_xlabel("LDA1"); ax.set_ylabel("LDA2" if k >= 2 else "(jitter)")
+        ax.set_xlabel("LDA1"); ax.set_ylabel("LDA2" if k >= 2 else "")
         if k < 2:
             ax.set_yticks([])
         ax.set_title(f"{factor}", fontsize=10); ax.grid(alpha=0.25)
@@ -1004,66 +1007,6 @@ def plot_participant_clusters(X, sub_meta, info, verdict, height, out_dir):
     path = out_dir / f"participants_{height}.png"
     fig.savefig(path, dpi=120, bbox_inches="tight"); plt.close(fig)
     return path
-
-
-def plot_participant_drift(X, sub_meta, info, verdict, height, out_dir):
-    """Option C: per-participant DRIFT across the levels of each factor. In each
-    panel (one factor) the x-axis is the factor's levels and the y-axis is that
-    participant's mean LDA1 centroid at each level; one line per participant. A
-    steep line = the factor moves that person a lot; a flat line = it barely does.
-    The vertical spread of the lines at each level IS the between-participant
-    dispersion (sigma), so: lines piled flat and together = the consistency
-    collapse (no drift, no spread); steep and parallel = a strong, consistent
-    effect; steep but crossing = strong but inconsistent."""
-    if X.shape[0] < 3 or X.shape[1] < 2:
-        return None
-    parts_all = sub_meta["participant"].astype(str).values
-    uparts = sorted(pd.unique(parts_all))
-    cmap = plt.get_cmap("tab20" if len(uparts) > 10 else "tab10")
-    pcolor = {p: cmap(i % cmap.N) for i, p in enumerate(uparts)}
-    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
-    for ax, factor in zip(axes.ravel(), PARAM_FACTORS):
-        labels = sub_meta[factor].values
-        can, lv, k = _lda_canonical(X, labels, n_axes=1)   # LDA1 carries the slope
-        v = info.get(factor, {})
-        wt = v.get("data_weight", np.nan); ev = v.get("eta_sum", np.nan); p = v.get("p_value", np.nan)
-        title = (f"{factor}   w={wt:.2f}  eig={ev:.3f}  p={p:.3f}"
-                 if wt == wt else f"{factor}   (LDA not estimable)")
-        if can is None:
-            ax.text(0.5, 0.5, "LDA not estimable", ha="center", va="center", transform=ax.transAxes, fontsize=9)
-            ax.set_title(title, fontsize=10); continue
-        keep = np.array([l is not None and not (isinstance(l, float) and np.isnan(l)) for l in labels])
-        pk = parts_all[keep]
-        lv_str = lv.astype(str)
-        levs = [l for l in pd.unique(lv_str) if l != "nan"]
-        try:
-            levs = sorted(levs, key=lambda s: float(s))
-        except ValueError:
-            levs = sorted(levs)
-        xpos = {lev: i for i, lev in enumerate(levs)}
-        for pp in uparts:
-            xs, ys = [], []
-            for lev in levs:
-                mm = (pk == pp) & (lv_str == lev)
-                if mm.any():
-                    xs.append(xpos[lev]); ys.append(float(can[mm, 0].mean()))
-            if xs:
-                ax.plot(xs, ys, "-o", color=pcolor[pp], alpha=0.75, ms=5, linewidth=1.4)
-        ld = (verdict.get(factor, {}) or {}).get("level_disp_lda1", {})
-        ax.set_xticks(range(len(levs)))
-        ax.set_xticklabels([f"{lev}\nσ={ld[lev]:.3f}" if ld.get(lev) == ld.get(lev) else lev for lev in levs], fontsize=8)
-        ax.set_xlim(-0.3, len(levs) - 0.7)
-        ax.set_xlabel(f"{factor} level"); ax.set_ylabel("LDA1 centroid (per participant)")
-        ax.set_title(title, fontsize=10); ax.grid(axis="y", alpha=0.25)
-    handles = [plt.Line2D([0], [0], marker="o", color=pcolor[p], label=p) for p in uparts]
-    fig.legend(handles=handles, loc="lower center", ncol=min(len(uparts), 8), fontsize=8,
-               title="participant (one line = one participant's drift across levels)")
-    fig.suptitle(f"Per-participant drift across factor levels (LDA1) -- {height}", fontsize=12)
-    fig.tight_layout(rect=[0, 0.06, 1, 0.97])
-    path = out_dir / f"participant_drift_{height}.png"
-    fig.savefig(path, dpi=120, bbox_inches="tight"); plt.close(fig)
-    return path
-
 
 
 def recommend_consistency(X, sub_meta, info, height, min_participants=2, n_perm=200, alpha=0.05):
@@ -1197,10 +1140,351 @@ def add_prototype_label(meta: pd.DataFrame) -> pd.DataFrame:
     return meta
 
 
+def weighted_config_ranking(verdict: dict, info: dict, height: str) -> pd.DataFrame:
+    """Rank all configurations at one height by a weighted consistency score that
+    uses the Stage 1 factor weights:
+
+        S_c = sum_f  W_f * sigma_{f, level_f(c)} / mean_l(sigma_{f, l})
+
+    Each level's dispersion is expressed relative to its own factor's average
+    (dispersions of different factors are measured in different discriminant
+    spaces, so they are not directly comparable); 1 = an average level for that
+    factor, below 1 = more consistent. W_f is the factor's Stage 1 weight
+    (normalised summed LDA eigenvalue, summing to 1), so S_c is a weighted average
+    of relative dispersions: lower = more consistent overall.
+
+    Because S_c is a sum of independent per-factor terms, the top-ranked
+    configuration is always the combination of each factor's most consistent
+    level, whatever the weights; the weights determine the order of the remaining
+    configurations and how far each falls behind the best."""
+    import itertools
+    rel, weights = {}, {}
+    for f in PARAM_FACTORS:
+        disp = {_canonical_level(f, k): d for k, d in ((verdict.get(f) or {}).get("level_disp") or {}).items()
+                if d == d}
+        if not disp:
+            return pd.DataFrame()
+        mean_d = float(np.mean(list(disp.values())))
+        rel[f] = {lev: d / mean_d for lev, d in disp.items()} if mean_d > 0 else {lev: 1.0 for lev in disp}
+        weights[f] = info.get(f, {}).get("data_weight", np.nan)
+    if any(w != w for w in weights.values()):
+        return pd.DataFrame()
+    rows = []
+    for combo in itertools.product(*[sorted(rel[f], key=lambda l: LEVEL_ORDER[f].index(l)
+                                            if l in LEVEL_ORDER[f] else 99) for f in PARAM_FACTORS]):
+        levels = dict(zip(PARAM_FACTORS, combo))
+        score = sum(weights[f] * rel[f][levels[f]] for f in PARAM_FACTORS)
+        row = {"height": height, "config": "_".join(combo), "score": score}
+        for f in PARAM_FACTORS:
+            row[f] = levels[f]
+            row[f"{f}_relative_dispersion"] = rel[f][levels[f]]
+            row[f"{f}_weight"] = weights[f]
+        rows.append(row)
+    out = pd.DataFrame(rows).sort_values("score").reset_index(drop=True)
+    out.insert(1, "rank", range(1, len(out) + 1))
+    best = out["score"].iloc[0]
+    out["pct_worse_than_best"] = 100.0 * (out["score"] - best) / best
+    return out
 
 
+def print_weighted_ranking(rank_df: pd.DataFrame, height: str, top_n: int = 5):
+    print(f"\n  WEIGHTED CONFIGURATION RANKING (consistency x Stage 1 weights) -- {height}")
+    print(f"      {'Rk':<3} {'Configuration':<34} {'Score':>6} {'vs best':>8}")
+    for _, r in rank_df.head(top_n).iterrows():
+        print(f"      {int(r['rank']):<3} {r['config']:<34} {r['score']:>6.3f} {r['pct_worse_than_best']:>+7.1f}%")
+    print(f"      ... {len(rank_df)} configurations in total; score = weighted mean relative "
+          f"dispersion (lower = more consistent)")
 
 
+# ============================================================================
+# 10. Thesis figure and table (same layout as 05_rank_prototypes.py)
+# ============================================================================
+
+def _canonical_level(factor, lev):
+    """Map a level label as stored in this pipeline (e.g. Angle '90' or '90.0')
+    to the shared canonical label used in the thesis outputs (e.g. 'A90')."""
+    s = str(lev).strip()
+    if factor == "Angle":
+        try:
+            return f"A{int(float(s.lstrip('Aa')))}"
+        except ValueError:
+            return s
+    return s
+
+
+DISPLAY_LEVEL = {"Short": "Short", "Long": "Long", "Small": "Small", "Large": "Large",
+                 "Not_weighted": "Non-weighted", "Front_weighted": "Weighted",
+                 "A90": "90\u00b0", "A135": "135\u00b0", "A180": "180\u00b0"}
+
+
+# Angle has three levels, which tints of one orange cannot separate clearly, so it
+# uses three distinct warm colours (dark brown-orange, orange, gold) instead.
+LEVEL_COLOURS = {"Angle": {"A90": "#8c3b0f", "A135": "#e8892c", "A180": "#f2c94c"}}
+
+
+def _shades(hex_colour, n):
+    """n shades of a factor's colour, from the full colour to a lighter tint."""
+    rgb = np.array(matplotlib.colors.to_rgb(hex_colour))
+    return [tuple(rgb + (1 - rgb) * t) for t in np.linspace(0.0, 0.55, n)]
+
+
+def _cov_ellipse(ax, pts, colour, n_sd=1.0):
+    from matplotlib.patches import Ellipse
+    if len(pts) < 3:
+        return
+    cov = np.cov(pts.T)
+    vals, vecs = np.linalg.eigh(cov)
+    order = vals.argsort()[::-1]
+    vals, vecs = vals[order], vecs[:, order]
+    angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
+    w, h = 2 * n_sd * np.sqrt(np.clip(vals, 0, None))
+    ax.add_patch(Ellipse(pts.mean(axis=0), w, h, angle=angle, facecolor="none",
+                         edgecolor=colour, linewidth=1.8, zorder=4))
+
+
+def plot_separation_consistency(X, sub_meta, info, verdict, height, out_dir):
+    """Two figures per working height, each a 2x2 grid (one panel per parameter) in
+    that parameter's LDA discriminant space:
+      lda_stage1_separation_<height>   every event's discriminant score, as a smoothed
+            distribution per setting (binary parameters) or a 2-D scatter with 1-SD
+            ellipses (angle, two discriminant axes); title: factor weight and the LDA
+            permutation p-value.
+      lda_stage2_consistency_<height>  each participant's mean position at a setting,
+            relative to that setting's centre (x100); the band (binary) or circle
+            (angle) has radius sigma, the between-participant dispersion reported in
+            the consistency table; most consistent setting in bold; title: consistency
+            permutation p-value.
+    Returns the Stage 1 figure path."""
+    from scipy.stats import gaussian_kde
+    from matplotlib.patches import Circle
+    if X.shape[0] < 3 or X.shape[1] < 2:
+        return None
+    plt.rcParams.update({"font.family": "serif", "font.size": 8.5})
+    parts_all = sub_meta["participant"].astype(str).values
+    fig1, fig2 = plt.figure(figsize=(7.4, 6.4)), plt.figure(figsize=(7.4, 6.4))
+    gs1 = fig1.add_gridspec(2, 2, hspace=0.5, wspace=0.32)
+    gs2 = fig2.add_gridspec(2, 2, hspace=0.5, wspace=0.42)
+    fmt = lambda p: ("p < 0.001" if p < 0.001 else f"p = {p:.3f}") if p == p else "p = n/a"
+    for idx, factor in enumerate(FIG_FACTORS):
+        r_, c_ = divmod(idx, 2)
+        axL, axR = fig1.add_subplot(gs1[r_, c_]), fig2.add_subplot(gs2[r_, c_])
+        labels = sub_meta[factor].values
+        can, lv, k = _lda_canonical(X, labels, n_axes=2)
+        v_info = info.get(factor, {})
+        v_cons = (verdict or {}).get(factor, {}) or {}
+        if can is None:
+            for ax in (axL, axR):
+                ax.text(0.5, 0.5, "LDA not estimable", ha="center", va="center", transform=ax.transAxes)
+                ax.set_axis_off()
+            continue
+        keep = np.array([l is not None and not (isinstance(l, float) and np.isnan(l)) for l in labels])
+        pk = parts_all[keep]
+        canon = np.array([_canonical_level(factor, l) for l in lv])
+        levels = [l for l in LEVEL_ORDER[factor] if l in set(canon)]
+        cols = dict(zip(levels, _shades(FACTOR_COLOURS[factor], len(levels))))
+        cols.update({l: c for l, c in LEVEL_COLOURS.get(factor, {}).items() if l in cols})
+        disp = {_canonical_level(factor, a): d * DISP_SCALE for a, d in (v_cons.get("level_disp") or {}).items()}
+        best = _canonical_level(factor, v_cons["best_level"]) if v_cons.get("best_level") is not None else None
+        axL.set_title(f"{factor}: factor weight {v_info.get('data_weight', np.nan):.2f}, "
+                      f"{fmt(v_info.get('p_value', np.nan))}", fontsize=9, loc="left")
+        axR.set_title(f"{factor}: consistency {fmt(v_cons.get('p_value', np.nan))}", fontsize=9, loc="left")
+
+        if k >= 2:   # ---------------- angle: two discriminant axes ----------------
+            reach = 0.0
+            for lev in levels:
+                m = canon == lev
+                axL.scatter(can[m, 0], can[m, 1], s=8, color=cols[lev], alpha=0.5, linewidths=0)
+                _cov_ellipse(axL, can[m, :2], cols[lev])
+                axL.scatter(*can[m, :2].mean(axis=0), marker="X", s=60, color=cols[lev],
+                            edgecolor="black", linewidth=0.7, zorder=5, label=DISPLAY_LEVEL[lev])
+                cents = np.array([can[m & (pk == p), :2].mean(axis=0) for p in pd.unique(pk[m])])
+                dev = (cents - cents.mean(axis=0)) * DISP_SCALE
+                r = disp.get(lev, np.nan)
+                axR.scatter(dev[:, 0], dev[:, 1], s=16, color=cols[lev], edgecolor="white",
+                            linewidth=0.4, zorder=3)
+                if r == r:
+                    axR.add_patch(Circle((0, 0), r, facecolor="none", edgecolor=cols[lev], linewidth=1.6, zorder=4))
+                    axR.plot([], [], color=cols[lev], linewidth=1.6, label=f"{DISPLAY_LEVEL[lev]} (\u03c3 = {r:.2f})")
+                reach = max(reach, np.abs(dev).max() if len(dev) else 0, r if r == r else 0)
+            lim = 1.15 * reach if reach > 0 else 1
+            axR.set_xlim(-lim, lim); axR.set_ylim(-lim, lim)
+            axR.axhline(0, color="0.8", linewidth=0.8); axR.axvline(0, color="0.8", linewidth=0.8)
+            axR.set_aspect("equal")
+            axL.set_aspect("equal", adjustable="datalim")
+            axL.set_xlabel("Discriminant axis 1"); axL.set_ylabel("Discriminant axis 2")
+            axR.set_xlabel("Axis 1, relative (\u00d7100)"); axR.set_ylabel("Axis 2, relative (\u00d7100)")
+            axL.legend(fontsize=7.5, frameon=False, loc="best", handletextpad=0.2)
+            leg = axR.legend(fontsize=7, frameon=False, loc="best", handlelength=1.2)
+            for t in leg.get_texts():
+                if best and t.get_text().startswith(DISPLAY_LEVEL[best] + " "):
+                    t.set_fontweight("bold")
+        else:        # ---------------- binary parameters: one discriminant axis ----------------
+            lo, hi = can[:, 0].min(), can[:, 0].max()
+            pad = 0.08 * (hi - lo)
+            grid = np.linspace(lo - pad, hi + pad, 300)
+            ypos = {lev: len(levels) - 1 - i for i, lev in enumerate(levels)}   # first setting on top
+            reach = 0.0
+            for lev in levels:
+                yi, m = ypos[lev], canon == lev
+                vals = can[m, 0]
+                if len(vals) > 2 and np.ptp(vals) > 0:
+                    dens = gaussian_kde(vals)(grid)
+                    dens = 0.8 * dens / dens.max()
+                    axL.fill_between(grid, yi, yi + dens, color=cols[lev], alpha=0.55, linewidth=0)
+                    axL.plot(grid, yi + dens, color=cols[lev], linewidth=1)
+                axL.plot([vals.mean()] * 2, [yi, yi + 0.85], color="black", linewidth=1.3)
+                cents = np.array([vals[pk[m] == p].mean() for p in pd.unique(pk[m])])
+                dev = (cents - cents.mean()) * DISP_SCALE
+                r = disp.get(lev, np.nan)
+                if r == r:
+                    axR.fill_between([-r, r], yi - 0.2, yi + 0.2, color=cols[lev], alpha=0.25, linewidth=0, zorder=1)
+                    axR.text(0, yi + 0.24, f"\u03c3 = {r:.2f}", ha="center", va="bottom", fontsize=7.5,
+                             fontweight="bold" if lev == best else "normal")
+                axR.scatter(dev, np.full(len(dev), yi), s=18, color=cols[lev], edgecolor="white",
+                            linewidth=0.4, zorder=3)
+                reach = max(reach, np.abs(dev).max() if len(dev) else 0, r if r == r else 0)
+            lim = 1.15 * reach if reach > 0 else 1
+            axR.set_xlim(-lim, lim)
+            axR.axvline(0, color="0.55", linewidth=1)
+            names = [DISPLAY_LEVEL[l] for l in levels]
+            axL.set_yticks([ypos[l] + 0.3 for l in levels]); axL.set_yticklabels(names)
+            axL.set_ylim(-0.1, len(levels) - 0.05)
+            axR.set_yticks([ypos[l] for l in levels]); axR.set_yticklabels(names)
+            for t, lev in zip(axR.get_yticklabels(), levels):
+                if lev == best:
+                    t.set_fontweight("bold")
+            axR.set_ylim(-0.6, len(levels) - 0.25)
+            axL.set_xlabel("Discriminant axis 1")
+            axR.set_xlabel("Participant mean, relative (\u00d7100)")
+            for ax in (axL, axR):
+                ax.tick_params(axis="y", length=0)
+        for ax in (axL, axR):
+            ax.grid(alpha=0.2)
+            ax.set_axisbelow(True)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+    paths = []
+    for fig, stem in ((fig1, f"lda_stage1_separation_{height}"), (fig2, f"lda_stage2_consistency_{height}")):
+        fig.subplots_adjust(left=0.12, right=0.9, top=0.93, bottom=0.09)
+        for ext in ("pdf", "png"):
+            fig.savefig(out_dir / f"{stem}.{ext}", dpi=200, bbox_inches="tight")
+        paths.append(out_dir / f"{stem}.pdf")
+        plt.close(fig)
+    return paths[0]
+
+
+def plot_factor_weights(fw: pd.DataFrame, out_dir: Path):
+    """Factor weights (0-1) on a single axis, grouped by working height, one bar
+    per factor -- identical layout and colours to 05_rank_prototypes.py's
+    Stage 1 figure, so the two approaches can be set side by side."""
+    plt.rcParams.update({"font.family": "serif", "font.size": 9})
+    heights = [h for h in VALID_HEIGHTS if h in set(fw["height"])]
+    fig, ax = plt.subplots(figsize=(7.2, 3.4))
+    x, w = np.arange(len(heights)), 0.2
+    for i, f in enumerate(FIG_FACTORS):
+        vals = []
+        for h in heights:
+            r = fw[(fw["height"] == h) & (fw["factor"] == f)]
+            vals.append(float(r["data_weight"].iloc[0]) if len(r) else np.nan)
+        xs = x + (i - (len(FIG_FACTORS) - 1) / 2) * w
+        ax.bar(xs, vals, w, color=FACTOR_COLOURS[f], edgecolor="white", linewidth=0.8, label=f)
+        for xi, v in zip(xs, vals):
+            if np.isfinite(v):
+                ax.text(xi, v + 0.015, f"{v:.2f}", ha="center", va="bottom", fontsize=7.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{h} workstation" for h in heights])
+    ax.set_ylim(0, 1)
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1])
+    ax.set_ylabel("Factor weight")
+    ax.grid(axis="y", alpha=0.2)
+    ax.set_axisbelow(True)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    ax.legend(title="Parameter", frameon=False, ncol=len(FIG_FACTORS),
+              loc="upper right", fontsize=8, title_fontsize=8)
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(out_dir / f"lda_factor_importance.{ext}", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+DISP_SCALE = 100   # dispersions are small (~0.01-0.1, arbitrary units); shown x100 to 2 dp so
+                   # that levels which differ only in the fourth decimal place stay distinguishable
+
+
+def write_consistency_table(results: dict, path: Path, alpha: float = 0.05):
+    """LaTeX table of the consistency results: one column per workstation, one row
+    per factor level -- the same layout as 05_rank_prototypes.py's table. Bold =
+    most consistent level of each factor at that height; the p row is the
+    within-participant permutation test (bold if significant). Bottom rows: the
+    most consistent configuration (every factor's most consistent level) and the
+    recommended configuration (significant factors only). Needs booktabs.
+    `results` maps height -> verdict dict from recommend_consistency."""
+    heights = list(results)
+    n = len(heights)
+
+    def canon(verdict, f):
+        """level_disp / best / winner keyed by canonical level labels."""
+        v = verdict.get(f, {}) or {}
+        disp = {_canonical_level(f, k): d for k, d in (v.get("level_disp") or {}).items()}
+        best = _canonical_level(f, v["best_level"]) if v.get("best_level") is not None else None
+        win = _canonical_level(f, v["winner"]) if v.get("winner") is not None else None
+        return disp, best, win, v.get("p_value", np.nan), bool(v.get("significant"))
+
+    lines = [r"% Generated by run_hierarchical_fpca.py -- rerun to update. Requires booktabs.",
+             r"\begin{table}[htbp]", r"\centering", r"\small",
+             r"\caption{Factor-level between-participant consistency (fPCA--LDA). Values are the "
+             r"between-participant dispersion of participants' mean positions in each factor's "
+             r"LDA discriminant space (arbitrary units, $\times 100$); lower values indicate closer agreement "
+             r"between participants. Bold marks the most consistent level of each factor at each "
+             r"workstation (unbolded where levels tie at the precision shown). $p$ is from a "
+             r"within-participant permutation test of the gap between the "
+             rf"most and least consistent levels, in bold where $p < {alpha:g}$. The most consistent "
+             r"configuration combines the most consistent level of every factor; the recommended "
+             r"configuration includes only factors with a significant difference.}",
+             r"\label{tab:fpca_consistency}",
+             r"\begin{tabular}{@{}ll" + "c" * n + r"@{}}", r"\toprule",
+             rf" & & \multicolumn{{{n}}}{{c}}{{Workstation}} \\",
+             rf"\cmidrule(l){{3-{n + 2}}}",
+             "Parameter & Level & " + " & ".join(heights) + r" \\", r"\midrule"]
+    for fi, f in enumerate(FIG_FACTORS):
+        per_h = {h: canon(results[h], f) for h in heights}
+        # bold the most consistent level only if it is visibly lowest at the displayed
+        # precision; a displayed tie is left unbolded rather than implying a difference
+        shown = {h: {lev: (f"{per_h[h][0][lev] * DISP_SCALE:.2f}" if per_h[h][0].get(lev, np.nan) == per_h[h][0].get(lev, np.nan) else None)
+                     for lev in LEVEL_ORDER[f]} for h in heights}
+        for li, lev in enumerate(LEVEL_ORDER[f]):
+            cells = []
+            for h in heights:
+                best = per_h[h][1]
+                txt = shown[h][lev]
+                tied = best is not None and sum(v == shown[h].get(best) for v in shown[h].values()) > 1
+                cells.append("--" if txt is None else (rf"\textbf{{{txt}}}" if (lev == best and not tied) else txt))
+            lines.append(f"{f if li == 0 else ''} & {TEX_LEVEL[lev]} & " + " & ".join(cells) + r" \\")
+        pcells = []
+        for h in heights:
+            _, _, _, p, sig = per_h[h]
+            pcells.append("--" if p != p else (rf"\textbf{{{p:.3f}}}" if sig else f"{p:.3f}"))
+        lines.append(r" & \textit{p} & " + " & ".join(pcells) + r" \\")
+        if fi < len(FIG_FACTORS) - 1:
+            lines.append(r"\addlinespace")
+    lines.append(r"\midrule")
+
+    best_cells, rec_cells = [], []
+    for h in heights:
+        bests = {f: canon(results[h], f)[1] for f in PARAM_FACTORS}
+        if all(bests.values()):
+            best_cells.append(rf"\shortstack{{{TEX_LEVEL[bests['Length']]}, {TEX_LEVEL[bests['Size']]}\\"
+                              rf"{TEX_LEVEL[bests['Weight']]}, {TEX_LEVEL[bests['Angle']]}}}")
+        else:
+            best_cells.append("--")
+        wins = [TEX_LEVEL[canon(results[h], f)[2]] for f in PARAM_FACTORS if canon(results[h], f)[2]]
+        rec_cells.append(", ".join(wins) if wins else "none")
+    lines.append(r"\multicolumn{2}{@{}l}{Most consistent configuration} & " + " & ".join(best_cells) + r" \\")
+    lines.append(r"\addlinespace")
+    lines.append(r"\multicolumn{2}{@{}l}{Recommended (significant factors)} & " + " & ".join(rec_cells) + r" \\")
+    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def print_pvalue_matrix(pvalue_df, strata):
@@ -1241,15 +1525,6 @@ def print_pvalue_matrix(pvalue_df, strata):
 
     print("\n  * = p < 0.05  (permutation test on LDA separation, "
           "per discriminant axis, within height stratum)")
-
-
-
-
-
-
-
-
-
 
 
 def cache_paths(cache_dir: Path):
@@ -1332,8 +1607,19 @@ def main():
     ap.add_argument("--n-components-hand", type=int, default=N_COMPONENTS_DEFAULT["hand"],
                     help=f"fPCA components the hand stream is compressed to "
                          f"(default {N_COMPONENTS_DEFAULT['hand']})")
+    ap.add_argument("--timing-block", action="store_true",
+                    help="Add a timing block (log duration + time-warping components) to the "
+                         "combined feature vector; outputs go to fpca_results_timing/ by default")
+    ap.add_argument("--registration", action="store_true",
+                    help="Switch ON elastic (SRVF) registration (robustness check; off by default); "
+                         "outputs go to fpca_results_reg/")
+    ap.add_argument("--no-registration", action="store_true",
+                    help="Accepted for compatibility; registration is already off by default")
+    ap.add_argument("--n-components-timing", type=int, default=3,
+                    help="fPCA components of the time-warping functions in the timing block (default 3)")
     ap.add_argument("--out", type=Path, default=None,
-                    help="Output dir (default: <landmarks-root>/metrics/fpca_results)")
+                    help="Output dir (default: <landmarks-root>/metrics/fpca_results, or "
+                         "fpca_results_timing with --timing-block)")
     ap.add_argument("--n-perm", type=int, default=1000,
                     help="Permutations for the LDA separation p-value test (default 1000)")
     ap.add_argument("--cache-dir", type=Path, default=None,
@@ -1349,7 +1635,9 @@ def main():
     if not args.landmarks_root.is_dir():
         sys.exit(f"ERROR: {args.landmarks_root} is not a directory")
 
-    out_dir = args.out or (args.landmarks_root / "metrics" / "fpca_results")
+    args.no_registration = not args.registration          # registration is off unless requested
+    suffix = ("_reg" if args.registration else "") + ("_timing" if args.timing_block else "")
+    out_dir = args.out or (args.landmarks_root / "metrics" / f"fpca_results{suffix}")
     cache_dir = args.cache_dir or (args.landmarks_root / "metrics" / "fpca_cache")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1388,6 +1676,8 @@ def main():
     factor_weight_rows = []
     recommendation_rows = []
     pvalue_rows = []
+    table_results = {}
+    ranking_rows = []
 
     for height in HEIGHTS:
         ids = meta.index[meta["height"] == height].tolist()
@@ -1397,8 +1687,14 @@ def main():
 
         print(f"\n{'='*70}\nHEIGHT: {height}  ({len(ids)} events)\n{'='*70}")
 
-        registered = register_stratum(ids, event_data, n_grid)
-        print("  Registration complete.")
+        if args.no_registration:
+            grid = np.linspace(0.0, 1.0, n_grid)
+            registered = {eid: event_data[eid]["curves"] for eid in ids}
+            warps = {eid: grid.copy() for eid in ids}
+            print("  Registration off (default): curves resampled only, not time-aligned.")
+        else:
+            registered, warps = register_stratum(ids, event_data, n_grid)
+            print("  Registration complete.")
 
         feat_names = domain_feature_names()
         n_components_by_domain = {
@@ -1427,6 +1723,33 @@ def main():
             })
             print(f"  [{domain}] {len(feats)} raw angles ({stacked.shape[1]} grid dims) -> "
                   f"{scores.shape[1]} components ({var_pct:.1f}% variance)")
+
+        if args.timing_block:
+            # timing block: log duration + leading components of the time-warping
+            grid = np.linspace(0.0, 1.0, n_grid)
+            dev = np.array([warps[eid] - grid for eid in ids])
+            if args.no_registration:          # identity warps: nothing to summarise, duration only
+                t_scores, t_eigs, t_pca = None, None, None
+            else:
+                t_scores, t_eigs, t_pca = domain_fpca(dev, args.n_components_timing)
+            dur = (meta.loc[ids, "stop_t_s"] - meta.loc[ids, "start_t_s"]).to_numpy(dtype=float)
+            logdur = np.log(np.clip(dur, 1e-3, None))[:, None]
+            if t_scores is None:
+                t_scores, t_eigs, warp_var = np.empty((len(ids), 0)), np.array([]), 0.0
+            else:
+                warp_var = float(np.sum(t_pca.explained_variance_ratio_) * 100)
+            block_scores["timing"] = np.hstack([t_scores, logdur - logdur.mean()])
+            block_eigs["timing"] = np.append(t_eigs, float(logdur.var()))
+            fpca_summary_rows.append({
+                "height": height, "domain": "timing", "input_curves": "time-warp + log duration",
+                "input_dims": n_grid + 1, "components_retained": block_scores["timing"].shape[1],
+                "variance_explained_pct": round(warp_var, 1), "n_events": len(ids),
+            })
+            if args.no_registration:
+                print("  [timing] log duration only (no registration, so no time-warping to summarise)")
+            else:
+                print(f"  [timing] log duration + {t_scores.shape[1]} time-warp components "
+                      f"({warp_var:.1f}% of warp variance)")
 
         if len(block_scores) < 2:
             print(f"  Skipping LDA for {height} -- fewer than 2 usable domains.")
@@ -1458,16 +1781,18 @@ def main():
             if not rec_rows.empty:
                 print_consistency_recommendation(rec_verdict, synth, height)
                 recommendation_rows.append(rec_rows.assign(recommended_config=synth))
+                table_results[height] = rec_verdict
+                rank_df = weighted_config_ranking(rec_verdict, info, height)
+                if not rank_df.empty:
+                    print_weighted_ranking(rank_df, height)
+                    ranking_rows.append(rank_df)
 
-            png = plot_factor_clusters(X, sub_meta, info, rec_verdict, height, out_dir)
+            png = plot_separation_consistency(X, sub_meta, info, rec_verdict, height, out_dir)
             if png:
                 print(f"  Wrote {png}")
             png_p = plot_participant_clusters(X, sub_meta, info, rec_verdict, height, out_dir)
             if png_p:
                 print(f"  Wrote {png_p}")
-            png_d = plot_participant_drift(X, sub_meta, info, rec_verdict, height, out_dir)
-            if png_d:
-                print(f"  Wrote {png_d}")
 
     # --- outputs ---
     if pvalue_rows:
@@ -1481,8 +1806,11 @@ def main():
     pd.DataFrame(fpca_summary_rows).to_csv(out_dir / "domain_fpca_summary.csv", index=False)
     print(f"Wrote {out_dir / 'domain_fpca_summary.csv'}")
     if factor_weight_rows:
-        pd.concat(factor_weight_rows, ignore_index=True).to_csv(out_dir / "lda_factor_weights.csv", index=False)
+        fw_all = pd.concat(factor_weight_rows, ignore_index=True)
+        fw_all.to_csv(out_dir / "lda_factor_weights.csv", index=False)
         print(f"Wrote {out_dir / 'lda_factor_weights.csv'}")
+        plot_factor_weights(fw_all, out_dir)
+        print(f"Wrote {out_dir / 'lda_factor_importance.pdf'} (factor weights by workstation)")
     if factor_level_rows:
         pd.concat(factor_level_rows, ignore_index=True).to_csv(out_dir / "lda_factor_leaderboard.csv", index=False)
         print(f"Wrote {out_dir / 'lda_factor_leaderboard.csv'}")
@@ -1495,6 +1823,12 @@ def main():
             sub = allrec[allrec["height"] == h]
             if not sub.empty:
                 print(f"  {h:<7}: {sub['recommended_config'].iloc[0]}")
+    if ranking_rows:
+        pd.concat(ranking_rows, ignore_index=True).to_csv(out_dir / "lda_weighted_config_ranking.csv", index=False)
+        print(f"Wrote {out_dir / 'lda_weighted_config_ranking.csv'} (all configurations, weighted ranking)")
+    if table_results:
+        write_consistency_table(table_results, out_dir / "lda_consistency_table.tex")
+        print(f"Wrote {out_dir / 'lda_consistency_table.tex'} (consistency table, thesis layout)")
     meta.to_csv(out_dir / "place_events_meta.csv", index=False)
     print(f"Wrote {out_dir / 'place_events_meta.csv'}")
     print("\nDone.")

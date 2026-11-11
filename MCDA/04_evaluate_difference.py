@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 r"""
+
 evaluate_difference.py
 
 Unified single-pass pipeline: extracts PEN task-performance metrics, POSTURE/REBA,
@@ -14,7 +15,7 @@ CLEANING INTEGRATION (from clean_place_events.py):
   - Place events listed in excluded_place_events.csv are skipped at extraction and
     filtered at compare. Disable with --no-exclude; relocate with --exclude-csv.
 
-STATISTICAL ENGINE (mixed-effects, MAIN EFFECTS ONLY), within each height stratum:
+MCDA COMPARISON
       metric ~ C(Length) + C(Size) + C(Weight) + C(Angle) + (1 | participant)
   A joint Wald test per factor; per-level signed coefficients retained (needed for
   Angle's two contrasts). No interaction terms (they made the coarse REBA/grip
@@ -31,8 +32,12 @@ MODES:
   1. Compare only (default):  --mode compare  reads metrics/combined_place_metrics.csv
   2. Extract only:            --mode extract  writes metrics/combined_place_metrics.csv
   3. End-to-end:              --mode all      extract then compare
+  4. Sensitivity sweep:       --mode sensitivity  runs compare at 4 coverage thresholds
+                              (from clean_place_events_sensitivity.py output) and writes
+                              a cross-threshold report showing which results are stable.
 
   python MCDA/04_evaluate_difference.py --mode compare --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
+  python MCDA/04_evaluate_difference.py --mode sensitivity --landmarks-root A:\Automated_chain_BETA\Participant_Landmarks
 
   Optional:
      --combined-csv PATH     Explicit path to combined_place_metrics.csv (compare-only)
@@ -41,10 +46,14 @@ MODES:
      --no-zfilt              Use raw body even when *_body_zfilt.csv exist
      --no-exclude            Keep events even if in the cleaning manifest
      --exclude-csv PATH      excluded_place_events.csv (default <root>/metrics/cleaning/...)
+     --sensitivity-root PATH Root dir from clean_place_events_sensitivity.py
+                             (default: <landmarks-root>/metrics/cleaning_sensitivity)
+     --thresholds 0.60,0.70,0.80,0.90   Thresholds to sweep in sensitivity mode
 """
 
 import argparse
 import re
+import shutil
 import sys
 import warnings
 from collections import defaultdict
@@ -93,13 +102,10 @@ POSTURE_METRICS = [
     ("reba_score_b_left",         "REBA Score B (Left Arm/Wrist)",     "score"),
     ("reba_grand_right",          "REBA Grand Score (Right)",          "score"),
     ("reba_grand_left",           "REBA Grand Score (Left)",           "score"),
-    ("trunk_flex_mean",           "Trunk Flexion",                     "deg"),
-    ("neck_flex_mean",            "Neck Flexion",                      "deg"),
     ("reach_ratio_mean",          "Reach Ratio",                       "ratio"),
-    ("wrist_elevation_m_mean",    "Wrist Elevation Above Shoulder",    "m"),
     ("right_grip_comfort_score",  "R Grip Comfort Index",              "score"),
-    ("right_sparc_linear",        "R Linear Smoothness (SPARC)",       "val"),
-    ("right_sparc_angular",       "R Angular Smoothness (SPARC)",      "val"),
+    ("right_sparc_linear",        "R Linear Smoothness",       "val"),
+    ("right_sparc_angular",       "R Angular Smoothness",      "val"),
 ]
 ALL_METRICS   = PEN_METRICS + POSTURE_METRICS
 PARAM_FACTORS = ["Length", "Size", "Weight", "Angle"]
@@ -117,6 +123,8 @@ PEN_METRIC_KEYS = ["n_samples", "perp_mean_deg", "perp_var_deg2",
                    "leftright_mean_deg", "leftright_var_deg2",
                    "updown_mean_deg", "updown_var_deg2",
                    "pos_jitter_mm", "ang_jitter_deg"]
+
+SENSITIVITY_THRESHOLDS_DEFAULT = [0.60, 0.70, 0.80, 0.90]
 
 
 # =========================================================================== #
@@ -740,9 +748,6 @@ def run_comparison(df, out_dir, args, exclude_keys=None):
         df = df[df["participant"].astype(str).isin(keep)].copy()
         if df.empty: sys.exit(f"No rows remaining for participants: {sorted(keep)}")
 
-    # Quarantine events with no valid working-height label (midpoint fell outside
-    # every High/Medium/Low window). The rows remain in combined_place_metrics.csv
-    # for audit; they are simply not analysed by height.
     if "height" in df.columns and not args.keep_unknown_height:
         df["height"] = df["height"].astype(str).str.strip()
         bad = ~df["height"].isin(VALID_HEIGHTS)
@@ -786,7 +791,7 @@ def run_comparison(df, out_dir, args, exclude_keys=None):
     if not args.no_stratify and sc in df.columns:
         if sc == "height":
             strata = [h for h in VALID_HEIGHTS if h in set(df[sc].dropna())]
-            df_s = df[df[sc].isin(strata)].copy()   # never stratify on Unknown/blank
+            df_s = df[df[sc].isin(strata)].copy()
         else:
             strata = sorted(df[sc].dropna().unique(), key=str)
             df_s = df
@@ -829,12 +834,135 @@ def run_comparison(df, out_dir, args, exclude_keys=None):
 
 
 # =========================================================================== #
+# SECTION 7b: CROSS-THRESHOLD SENSITIVITY REPORT
+# =========================================================================== #
+
+def _load_stratified_tests(out_dir: Path) -> pd.DataFrame:
+    p = out_dir / "stratified_stat_tests.csv"
+    if not p.is_file():
+        return pd.DataFrame()
+    df = pd.read_csv(p)
+    if "level" in df.columns:
+        df = df.drop_duplicates(subset=["stratum", "factor", "metric"])
+    return df
+
+
+def build_sensitivity_report(threshold_out_dirs: dict, thresholds: list, report_dir: Path):
+    """
+    Compare stratified p-value matrices across thresholds and write:
+      sensitivity_retention.csv      — events kept per threshold
+      sensitivity_pvalue_matrix.csv  — p per factor/metric/stratum/threshold
+      sensitivity_sig_shifts.csv     — results that change significance
+      sensitivity_all_tests.csv      — all stratified tests pooled
+    """
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # retention table
+    retention_rows = []
+    for thr, tdir in threshold_out_dirs.items():
+        eq = tdir / "event_quality_used.csv"
+        if eq.is_file():
+            df_eq = pd.read_csv(eq)
+            n_total = len(df_eq)
+            n_kept  = int((df_eq["decision"] == "keep").sum()) if "decision" in df_eq.columns else n_total
+        else:
+            n_total = n_kept = float("nan")
+        retention_rows.append({
+            "threshold":    thr,
+            "n_kept":       n_kept,
+            "n_dropped":    n_total - n_kept if not np.isnan(n_total) else float("nan"),
+            "pct_retained": round(n_kept / n_total * 100, 1) if not np.isnan(n_total) and n_total > 0 else float("nan"),
+        })
+    pd.DataFrame(retention_rows).to_csv(report_dir / "sensitivity_retention.csv", index=False)
+
+    # collect per-threshold stratified tests
+    all_tests = []
+    for thr, tdir in threshold_out_dirs.items():
+        df_t = _load_stratified_tests(tdir)
+        if df_t.empty:
+            continue
+        df_t["threshold"] = thr
+        all_tests.append(df_t)
+
+    if not all_tests:
+        print("  [sensitivity] no stratified_stat_tests.csv found in any threshold dir.")
+        return
+
+    combined = pd.concat(all_tests, ignore_index=True)
+    combined.to_csv(report_dir / "sensitivity_all_tests.csv", index=False)
+
+    # pivot: factor x metric x stratum, columns = thresholds
+    strata  = ["High", "Medium", "Low"]
+    pivot_rows, shift_rows = [], []
+
+    for stratum in strata:
+        for factor in PARAM_FACTORS:
+            for col, label, _ in ALL_METRICS:
+                row = {"stratum": stratum, "factor": factor,
+                       "metric": col, "metric_label": label}
+                sig_flags = {}
+                for thr in thresholds:
+                    match = combined[
+                        (combined["threshold"] == thr) &
+                        (combined["stratum"]   == stratum) &
+                        (combined["factor"]    == factor) &
+                        (combined["metric"]    == col)
+                    ]
+                    p = match.iloc[0]["p_value"] if not match.empty else float("nan")
+                    row[f"p_{thr:.2f}"] = round(float(p), 4) if not np.isnan(p) else float("nan")
+                    sig_flags[thr] = (not np.isnan(p) and p < 0.05)
+
+                row["n_thresholds_significant"] = sum(sig_flags.values())
+                row["stable_significant"]        = all(sig_flags.values())
+                row["stable_nonsignificant"]     = not any(sig_flags.values())
+                row["threshold_sensitive"]       = (0 < sum(sig_flags.values()) < len(thresholds))
+                pivot_rows.append(row)
+                if row["threshold_sensitive"]:
+                    shift_rows.append(row)
+
+    pd.DataFrame(pivot_rows).to_csv(report_dir / "sensitivity_pvalue_matrix.csv", index=False)
+    pd.DataFrame(shift_rows).to_csv(report_dir / "sensitivity_sig_shifts.csv",    index=False)
+
+    # console summary
+    print(f"\n{'='*70}\nSENSITIVITY ANALYSIS REPORT\n{'='*70}")
+    print("\nEvent retention:")
+    print(f"  {'Threshold':>10}  {'Kept':>6}  {'Dropped':>8}  {'% Retained':>11}")
+    for r in retention_rows:
+        kept_s    = str(int(r["n_kept"]))    if not np.isnan(r["n_kept"])    else "n/a"
+        dropped_s = str(int(r["n_dropped"])) if not np.isnan(r["n_dropped"]) else "n/a"
+        print(f"  {r['threshold']:.0%}          {kept_s:>6}  {dropped_s:>8}  {r['pct_retained']:>10.1f}%")
+
+    pv = pd.DataFrame(pivot_rows)
+    print(f"\nResult stability ({len(thresholds)} thresholds x {len(strata)} strata x "
+          f"{len(PARAM_FACTORS)} factors x {len(ALL_METRICS)} metrics):")
+    print(f"  Significant at ALL thresholds    : {pv['stable_significant'].sum()}")
+    print(f"  Non-significant at ALL thresholds: {pv['stable_nonsignificant'].sum()}")
+    print(f"  Threshold-sensitive (changes)    : {pv['threshold_sensitive'].sum()}")
+
+    if shift_rows:
+        print("\nThreshold-sensitive results:")
+        header = (f"  {'Stratum':<8} {'Factor':<8} {'Metric':<35} "
+                  + "  ".join(f"p@{t:.2f}" for t in thresholds))
+        print(header)
+        print(f"  {'-'*80}")
+        for r in shift_rows:
+            p_strs = "  ".join(
+                f"{r[f'p_{t:.2f}']:6.3f}{'*' if (not np.isnan(r[f'p_{t:.2f}']) and r[f'p_{t:.2f}'] < 0.05) else ' '}"
+                for t in thresholds
+            )
+            print(f"  {r['stratum']:<8} {r['factor']:<8} {r['metric_label']:<35} {p_strs}")
+
+    print(f"\nSensitivity outputs: {report_dir}")
+    print(f"{'='*70}")
+
+
+# =========================================================================== #
 # SECTION 8: CLI
 # =========================================================================== #
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", choices=["compare", "extract", "all"], default="compare")
+    ap.add_argument("--mode", choices=["compare", "extract", "all", "sensitivity"], default="compare")
     ap.add_argument("--landmarks-root", type=Path, default=None)
     ap.add_argument("--combined-csv", type=Path, default=None,
                     help="Explicit path to combined_place_metrics.csv (compare-only)")
@@ -850,13 +978,21 @@ def main():
     ap.add_argument("--no-exclude", action="store_true", help="Keep events even if in the cleaning manifest")
     ap.add_argument("--exclude-csv", type=Path, default=None,
                     help="excluded_place_events.csv (default <root>/metrics/cleaning/excluded_place_events.csv)")
+    ap.add_argument("--sensitivity-root", type=Path, default=None,
+                    help="Root dir from clean_place_events_sensitivity.py "
+                         "(default: <landmarks-root>/metrics/cleaning_sensitivity). "
+                         "Required for --mode sensitivity.")
+    ap.add_argument("--thresholds", type=str,
+                    default=",".join(str(t) for t in SENSITIVITY_THRESHOLDS_DEFAULT),
+                    help="Comma-separated thresholds to sweep in sensitivity mode "
+                         "(default: 0.60,0.70,0.80,0.90).")
     args = ap.parse_args()
 
     if not args.landmarks_root and not args.combined_csv:
         sys.exit("Error: provide --landmarks-root OR --combined-csv.")
     root = args.landmarks_root
 
-    # cleaning manifest (shared by extract + compare)
+    # cleaning manifest (shared by extract + compare + sensitivity)
     exclude_keys = set()
     if not args.no_exclude:
         exclude_csv = args.exclude_csv
@@ -882,6 +1018,49 @@ def main():
             print(f"Loaded {len(df)} Place events from {combined}")
         out_dir = (root / "metrics" / "combined_comparison") if root else (args.combined_csv.parent / "combined_comparison")
         run_comparison(df, out_dir, args, exclude_keys=exclude_keys)
+
+    if args.mode == "sensitivity":
+        if not root or not root.is_dir():
+            sys.exit("Error: --mode sensitivity requires a valid --landmarks-root.")
+        thresholds = [float(t.strip()) for t in args.thresholds.split(",")]
+        sens_root  = args.sensitivity_root or (root / "metrics" / "cleaning_sensitivity")
+        sens_out   = root / "metrics" / "sensitivity_comparison"
+
+        # verify threshold dirs exist
+        threshold_out_dirs = {}
+        for thr in thresholds:
+            tdir = sens_root / f"threshold_{thr:.2f}"
+            if not tdir.is_dir():
+                sys.exit(f"ERROR: threshold directory not found: {tdir}\n"
+                         f"Run clean_place_events_sensitivity.py first.")
+            threshold_out_dirs[thr] = tdir
+
+        # extract once at the loosest threshold so all potentially-kept events
+        # are present in combined_place_metrics.csv; each comparison pass then
+        # re-applies its own manifest to filter at runtime.
+        loosest_thr      = min(thresholds)
+        loosest_manifest = threshold_out_dirs[loosest_thr] / "excluded_place_events.csv"
+        print(f"\nExtraction pass using loosest threshold ({loosest_thr:.0%}) manifest.")
+        loose_exclude = load_excluded_events(str(loosest_manifest)) if not args.no_exclude else set()
+        df_sens = extract_features(root, participants_str=args.participants,
+                                   use_zfilt=not args.no_zfilt, exclude_keys=loose_exclude)
+
+        for thr in thresholds:
+            manifest = threshold_out_dirs[thr] / "excluded_place_events.csv"
+            thr_out  = sens_out / f"threshold_{thr:.2f}"
+            thr_out.mkdir(parents=True, exist_ok=True)
+            print(f"\n{'#'*70}\n# THRESHOLD {thr:.0%}\n{'#'*70}")
+            thr_exclude = load_excluded_events(str(manifest)) if not args.no_exclude else set()
+            run_comparison(df_sens.copy(), thr_out, args, exclude_keys=thr_exclude)
+            eq_src = threshold_out_dirs[thr] / "event_quality.csv"
+            if eq_src.is_file():
+                shutil.copy(eq_src, thr_out / "event_quality_used.csv")
+
+        build_sensitivity_report(
+            {thr: sens_out / f"threshold_{thr:.2f}" for thr in thresholds},
+            thresholds,
+            sens_out / "sensitivity_report",
+        )
 
 
 if __name__ == "__main__":

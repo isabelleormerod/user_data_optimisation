@@ -1,0 +1,956 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hand Pose Viewer</title>
+<style>
+:root{
+  --bg:#f6f5f2; --panel:#ffffff; --ink:#0b0b0b; --ink2:#52514e; --muted:#8a8984;
+  --line:#e4e3df; --accent:#eb6834; --accent-ink:#ffffff; --event:#f1e6c8; --event2:#e3ecf7; --mark:#2a78d6;
+  --stage:#ebeae6;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+header h1{font-size:15px;margin:0 8px 0 0;font-weight:650}
+.file{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);cursor:pointer;white-space:nowrap}
+.file:hover{border-color:var(--muted)} .file input{display:none} .file b{font-weight:600}
+.file .fn{color:var(--ink2);max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.hint{color:var(--muted);font-size:12px;margin-left:auto}
+main{display:grid;grid-template-columns:minmax(0,1fr) 340px;height:calc(100% - 53px)}
+#left{display:flex;flex-direction:column;min-width:0;padding:14px 16px;gap:10px;overflow:auto}
+#stageWrap{flex:1 1 auto;display:flex;align-items:center;justify-content:center;min-height:320px;background:var(--stage);border-radius:10px;position:relative;overflow:hidden}
+#stage{display:block;border-radius:4px;cursor:grab;touch-action:none;background:repeating-conic-gradient(#e2e1dc 0% 25%, #f3f2ee 0% 50%) 50% / 20px 20px}
+#stage:active{cursor:grabbing}
+#empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--ink2);text-align:center;padding:20px;pointer-events:none}
+#empty strong{color:var(--ink);font-size:15px}
+#overlay{position:absolute;left:12px;top:10px;font:12px system-ui;color:var(--ink2);pointer-events:none;background:rgba(255,255,255,.7);padding:2px 6px;border-radius:6px}
+#timeline{width:100%;height:84px;display:block;background:var(--panel);border:1px solid var(--line);border-radius:8px;cursor:pointer;touch-action:none}
+.transport{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.transport input[type=range]{flex:1 1 200px}
+button{font:inherit;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+button:hover{border-color:var(--muted)} button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+button:disabled{opacity:.45;cursor:default} button.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.readout{font-variant-numeric:tabular-nums;color:var(--ink2)} .readout b{color:var(--ink)}
+input[type=number],input[type=text],select{font:inherit;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+aside{border-left:1px solid var(--line);background:var(--panel);overflow:auto;padding:4px 0 20px}
+details{border-bottom:1px solid var(--line);padding:4px 14px 10px}
+summary{cursor:pointer;font-weight:620;padding:8px 0 6px;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"▸ ";color:var(--muted)} details[open] summary::before{content:"▾ "}
+.row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0}
+.row label{color:var(--ink2)} .row input[type=number]{width:84px} .row input[type=range]{width:140px}
+.row .val{font-variant-numeric:tabular-nums;color:var(--ink2);width:46px;text-align:right}
+.seg{display:flex;gap:4px;flex-wrap:wrap}
+.seg button{padding:4px 8px;font-size:12px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px} .kv dt{color:var(--muted)} .kv dd{margin:0;word-break:break-word}
+.list{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:6px}
+.list div{display:flex;align-items:center;gap:6px;padding:4px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;font-size:12px;cursor:pointer}
+.list div:last-child{border-bottom:none} .list div:hover{background:var(--bg)} .list div.on{background:#fcebe2}
+.list .lab{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink2)}
+.list .x{border:none;background:none;padding:0 4px;color:var(--muted)}
+.btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.small{font-size:12px;color:var(--muted)}
+.warn{color:#a2461d;font-size:12px;margin-top:6px}
+kbd{font:11px ui-monospace,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;background:var(--bg)}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#0b0b0b;color:#fff;padding:8px 14px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.on{opacity:.92}
+#prog{height:3px;background:var(--accent);width:0;transition:width .1s}
+@media (max-width:900px){main{grid-template-columns:1fr;height:auto}aside{border-left:none;border-top:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Hand Pose Viewer</h1>
+  <label class="file"><input id="fHand" type="file" accept=".csv"><b>Hand data</b><span class="fn" id="nHand">_hand.csv</span></label>
+  <label class="file"><input id="fPen" type="file" accept=".csv"><b>Pen</b><span class="fn" id="nPen">_pen.csv, optional</span></label>
+  <label class="file"><input id="fEvents" type="file" accept=".csv,.tsv,.txt"><b>Events</b><span class="fn" id="nEvents">_boris_synced.csv, optional</span></label>
+  <span class="hint">Files open locally in your browser and are never uploaded or modified.</span>
+</header>
+<div id="prog"></div>
+<main>
+  <section id="left">
+    <div id="stageWrap">
+      <canvas id="stage" width="10" height="10"></canvas>
+      <div id="overlay"></div>
+      <div id="empty"><strong>Choose the data folder and a trial, or load a _hand.csv</strong><span>Drag to rotate · Shift-drag or right-drag to pan · scroll to zoom</span></div>
+    </div>
+    <canvas id="timeline"></canvas>
+    <div class="transport">
+      <button id="bPrevEv" title="Previous event  [">⇤ ev</button>
+      <button id="bBack" title="Back 1 frame  ←">◂</button>
+      <button id="bPlay" title="Play / pause  Space">▶ Play</button>
+      <button id="bFwd" title="Forward 1 frame  →">▸</button>
+      <button id="bNextEv" title="Next event  ]">ev ⇥</button>
+      <select id="speed" title="Playback speed"><option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+      <input id="scrub" type="range" min="0" max="0" value="0">
+      <span class="readout" id="readout">–</span>
+    </div>
+    <div class="transport">
+      <button id="bMark" title="Mark frame  M">＋ Mark frame</button>
+      <button id="bPNG" class="primary" title="S">Save PNG</button>
+      <button id="bSVG">Save SVG</button>
+      <span class="small"><kbd>←</kbd><kbd>→</kbd> step · <kbd>Shift</kbd> ×10 · <kbd>Space</kbd> play · <kbd>M</kbd> mark · <kbd>S</kbd> save · <kbd>[</kbd><kbd>]</kbd> events · <kbd>1</kbd>–<kbd>6</kbd> hand views</span>
+    </div>
+  </section>
+
+  <aside>
+    <details open id="dTrial"><summary>Trial</summary>
+      <div class="btns">
+        <button id="bFolder" class="primary">Choose data folder</button>
+        <button id="bAddFolder" disabled>Add another folder</button>
+        <button id="bReconnect" style="display:none"></button>
+      </div>
+      <input id="fDir" type="file" webkitdirectory multiple style="display:none">
+      <div class="small" id="fsStatus" style="margin-top:6px">Pick Automated_chain_BETA (read only). Trials are the *_boris_synced.csv files in the trial folders.</div>
+      <div class="row"><label for="borisSel">Trial</label><select id="borisSel" style="max-width:210px"><option value="">–</option></select></div>
+      <div class="small" id="matchInfo" style="overflow-wrap:anywhere"></div>
+    </details>
+
+    <details open><summary>Hands &amp; camera</summary>
+      <div class="row"><label for="show">Show</label><select id="show"><option value="B">both hands</option><option value="R">right hand</option><option value="L">left hand</option></select></div>
+      <div class="row"><label for="follow">Camera follows</label><select id="follow"><option value="R">right hand</option><option value="L">left hand</option><option value="B">midpoint of both</option><option value="none">nothing (fixed)</option></select></div>
+      <div class="row"><label for="space">View frame</label><select id="space"><option value="hand">hand-local (stable hand)</option><option value="world">world (Unity)</option></select></div>
+      <div class="small" id="spaceInfo"></div>
+      <div class="seg" id="presets" style="margin-top:6px"></div>
+      <div class="row"><label for="az">Azimuth</label><input id="az" type="range" min="-180" max="180" step="1" value="0"><span class="val" id="azV"></span></div>
+      <div class="row"><label for="el">Elevation</label><input id="el" type="range" min="-89" max="89" step="1" value="0"><span class="val" id="elV"></span></div>
+      <div class="row"><label for="roll">Roll</label><input id="roll" type="range" min="-180" max="180" step="5" value="0"><span class="val" id="rollV"></span></div>
+      <div class="row"><label for="viewMM">View width (mm)</label><input id="viewMM" type="range" min="20" max="1500" step="5" value="260"><span class="val" id="viewV"></span></div>
+      <div class="row"><label for="proj">Projection</label><select id="proj"><option value="ortho">orthographic</option><option value="persp">perspective</option></select></div>
+      <div class="row"><label for="fov">Perspective strength</label><input id="fov" type="range" min="0.6" max="6" step="0.1" value="2"></div>
+      <div class="row"><label for="hand">Handedness</label><select id="hand"><option value="left">left-handed (Unity)</option><option value="right">right-handed</option></select></div>
+      <div class="btns"><button id="bReset">Reset pan &amp; zoom</button></div>
+    </details>
+
+    <details open><summary>Legibility</summary>
+      <div class="row"><label for="cMode">Colour</label><select id="cMode"><option value="tones">by finger, orange tones</option><option value="distinct">by finger, distinct hues</option><option value="single">single colour</option></select></div>
+      <div class="row"><label for="col">Hand colour</label><input id="col" type="color" value="#eb6834"></div>
+      <div class="row"><label for="lw">Bone width</label><input id="lw" type="range" min="0.5" max="10" step="0.25" value="5"></div>
+      <div class="row"><label for="jr">Joint size</label><input id="jr" type="range" min="0" max="8" step="0.25" value="2.5"></div>
+      <div class="row"><label for="halo">Outline (separates overlaps)</label><input id="halo" type="range" min="0" max="6" step="0.25" value="2"></div>
+      <div class="row"><label for="depth">Depth fading</label><input id="depth" type="range" min="0" max="0.8" step="0.05" value="0.25"></div>
+      <div class="row"><label for="palm">Palm fill</label><input id="palm" type="range" min="0" max="0.8" step="0.05" value="0.22"></div>
+      <div class="row"><label for="tips">Fingertip labels</label><input id="tips" type="checkbox"></div>
+      <div class="row"><label for="other">Fade the other hand</label><input id="other" type="checkbox" checked></div>
+      <div class="row"><label for="trail">Fingertip trail (s)</label><input id="trail" type="number" min="0" max="10" step="0.1" value="0"></div>
+      <div class="row"><label for="trailTips">Trail fingertips</label><select id="trailTips"><option value="TI">thumb + index</option><option value="all">all five</option><option value="I">index</option></select></div>
+      <div class="row"><label for="ghost">Ghost poses (n)</label><input id="ghost" type="number" min="0" max="12" step="1" value="0"></div>
+      <div class="row"><label for="ghostStep">Ghost spacing (s)</label><input id="ghostStep" type="number" min="0.02" step="0.05" value="0.2"></div>
+      <div class="row"><label for="flagDrop">Dashed on filled dropouts</label><input id="flagDrop" type="checkbox" checked></div>
+    </details>
+
+    <details open><summary>Prototype (gun) &amp; context</summary>
+      <div class="row"><label for="sPen">Show prototype</label><input id="sPen" type="checkbox" checked></div>
+      <div class="small" id="gunCfg"></div>
+      <div class="row"><label for="gLen">End-effector length (mm)</label><select id="gLen"><option value="auto">from trial</option><option value="150">150 (Short)</option><option value="220">220 (Long)</option></select></div>
+      <div class="row"><label for="gAng">Handle angle</label><select id="gAng"><option value="auto">from trial</option><option value="90">90°</option><option value="135">135°</option><option value="180">180°</option></select></div>
+      <div class="row"><label for="gDia">Handle diameter</label><select id="gDia"><option value="auto">from trial</option><option value="50">50 mm (Small)</option><option value="70">70 mm (Large)</option></select></div>
+      <div class="row"><label for="gHL">Handle length</label><input id="gHL" type="range" min="40" max="200" step="1" value="110"><span class="val" id="gHLv"></span></div>
+      <div class="row"><label for="gRear">Pen origin to barrel rear</label><input id="gRear" type="range" min="60" max="200" step="1" value="127"><span class="val" id="gRearv"></span></div>
+      <div class="row"><label for="gAtt">Handle joins barrel at (from rear)</label><input id="gAtt" type="range" min="0" max="150" step="1" value="0"><span class="val" id="gAttv"></span></div>
+      <div class="row"><label for="gRoll">Handle roll about barrel</label><input id="gRoll" type="range" min="-180" max="180" step="1" value="0"><span class="val" id="gRollv"></span></div>
+      <div class="row"><label for="gAngOff">Angle fine-tune</label><input id="gAngOff" type="range" min="-30" max="30" step="1" value="0"><span class="val" id="gAngOffv"></span></div>
+      <div class="row"><label for="gBD">Barrel diameter</label><input id="gBD" type="range" min="10" max="60" step="1" value="30"><span class="val" id="gBDv"></span></div>
+      <div class="row"><label for="gOp">Prototype opacity</label><input id="gOp" type="range" min="0.05" max="1" step="0.05" value="0.35"></div>
+      <div class="row"><label for="gPen">Show tracked pen inside</label><input id="gPen" type="checkbox"></div>
+      <div class="row"><label for="penDir">Pin tip along</label><select id="penDir"><option value="auto">auto</option><option value="z">local +z</option><option value="-z">local −z</option></select></div>
+      <div class="btns"><button id="gReset">Reset prototype geometry</button></div>
+      <div class="row"><label for="sPlane">Calibration plane</label><input id="sPlane" type="checkbox" checked></div>
+      <div class="row"><label for="planeGrid">Plane grid (mm)</label><input id="planeGrid" type="number" min="10" step="10" value="50"></div>
+      <div class="row"><label for="planeA">Plane opacity</label><input id="planeA" type="range" min="0" max="1" step="0.05" value="0.6"></div>
+      <div class="row"><label for="sAim">Aim ray to the plane</label><input id="sAim" type="checkbox" checked></div>
+      <div class="small" id="planeInfo"></div>
+      <div class="row"><label for="sAxes">Axes triad</label><input id="sAxes" type="checkbox" checked></div>
+      <div class="row"><label for="sScale">Scale bar</label><input id="sScale" type="checkbox" checked></div>
+      <div class="row"><label for="sLabels">Text labels</label><input id="sLabels" type="checkbox" checked></div>
+      <div class="small" id="penInfo"></div>
+    </details>
+
+    <details open><summary>Export</summary>
+      <div class="row"><label for="aspect">Frame aspect</label><select id="aspect"><option value="1">1:1</option><option value="1.3333">4:3</option><option value="0.75">3:4</option><option value="1.7778">16:9</option></select></div>
+      <div class="row"><label for="bg">Background</label><select id="bg"><option value="transparent">transparent</option><option value="white">white</option><option value="dark">dark</option></select></div>
+      <div class="row"><label for="expW">Export width (px)</label><input id="expW" type="number" min="200" max="8000" step="100" value="1400"></div>
+      <div class="row"><label for="prefix">File name prefix</label><input id="prefix" type="text" style="width:150px"></div>
+    </details>
+
+    <details open><summary>Marked frames <span class="small" id="markCount"></span></summary>
+      <div class="list" id="marks"><div class="lab small" style="cursor:default">Press M to mark frames</div></div>
+      <div class="btns"><button id="bExportAll" class="primary" disabled>Save all marked (PNG)</button><button id="bExportAllSVG" disabled>(SVG)</button><button id="bClear" disabled>Clear</button></div>
+    </details>
+
+    <details id="dEvents"><summary>Events <span class="small" id="evCount"></span></summary>
+      <div class="row"><label for="evJump">Jump to</label><select id="evJump"><option value="0">event start</option><option value="0.5" selected>event middle</option><option value="1">event end</option></select></div>
+      <div class="row"><label for="evFilter">Step through</label><select id="evFilter" style="max-width:150px"><option value="">all</option></select></div>
+      <div class="row"><label for="tlSig">Timeline signal</label><select id="tlSig"><option value="ap">grip aperture (thumb–index)</option><option value="speed">hand speed</option><option value="pen">hand–pen distance</option><option value="perp">pen angle to plane normal</option></select></div>
+      <div class="list" id="events"><div class="lab small" style="cursor:default">Events appear here once a trial is loaded</div></div>
+    </details>
+
+    <details><summary>Data</summary>
+      <dl class="kv" id="info"><dt>status</dt><dd>no file loaded</dd></dl>
+      <div class="warn" id="warn"></div>
+    </details>
+  </aside>
+</main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const S = { H:null, P:null, boris:null, trial:null, events:[], f:0, marks:[], playing:false, stem:"hand",
+  cam:{az:0, el:0, roll:0, panX:0, panY:0}, lastTarget:{R:null,L:null} };
+function escapeHTML(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+/* ======== shared with pose_frame_picker.html (same parsing and folder logic) ======== */
+/* ---------------------------------------------------------------- helpers */
+const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g,"");
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("on"); clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove("on"),2200); }
+function median(a){ const b=a.filter(Number.isFinite).sort((x,y)=>x-y); return b.length? b[b.length>>1] : NaN; }
+function quantile(sorted,q){ if(!sorted.length) return NaN; const i=clamp(Math.round(q*(sorted.length-1)),0,sorted.length-1); return sorted[i]; }
+function fmt(t,d=2){ return Number.isFinite(t)? t.toFixed(d) : "–"; }
+
+function detectDelim(line){
+  const c = {"\t":(line.match(/\t/g)||[]).length, ",":(line.match(/,/g)||[]).length, ";":(line.match(/;/g)||[]).length};
+  return Object.entries(c).sort((a,b)=>b[1]-a[1])[0][0];
+}
+function splitLine(line,d){
+  if(line.indexOf('"')<0) return line.split(d);
+  const out=[]; let cur="", q=false;
+  for(const ch of line){ if(ch==='"'){q=!q;continue;} if(ch===d&&!q){out.push(cur);cur="";} else cur+=ch; }
+  out.push(cur); return out;
+}
+function makeNum(d){
+  return s=>{ if(s==null) return NaN; s=String(s).trim(); if(s===""||/^(nan|null|none|na|n\/a|-)$/i.test(s)) return NaN;
+    if(d===";") s=s.replace(",","."); const v=Number(s); return Number.isFinite(v)? v : NaN; };
+}
+function parseTimeStr(s){
+  s=String(s).trim(); const m=s.match(/(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if(m) return (+m[1])*3600+(+m[2])*60+(+m[3]);
+  const d=Date.parse(s); return Number.isFinite(d)? d/1000 : NaN;
+}
+function readTable(text){
+  const lines=text.split(/\r?\n/).filter(l=>l.trim().length);
+  if(lines.length<2) throw new Error("File has no data rows.");
+  const d=detectDelim(lines[0]);
+  const header=splitLine(lines[0],d).map(h=>h.trim().replace(/^﻿/,""));
+  const rows=new Array(lines.length-1);
+  for(let i=1;i<lines.length;i++) rows[i-1]=splitLine(lines[i],d);
+  return {header,rows,d,num:makeNum(d)};
+}
+
+
+/* ---------------------------------------------------------------- events (BORIS) */
+/* BORIS exports vary (aggregated: Start (s)/Stop (s); tabular: Time + Status START/STOP), and the
+   synced converter may add pose-clock columns. Columns are guessed, shown, and can be overridden. */
+const ROLES=[["label","Behaviour"],["modifier","Modifier"],["media","Media file"],["obs","Observation id"],
+  ["start","Start (video)"],["stop","Stop (video)"],["time","Time (video)"],["status","Status"],
+  ["sStart","Start (synced)"],["sStop","Stop (synced)"],["sTime","Time (synced)"]];
+const SYNC_RE=/sync|unity|pose|clock|abs|global|realtime|aligned|convert|session|epoch/;
+const NOT_TIME_RE=/image|index|frame|duration|fps|length|offset|date/;
+const baseName=p=>String(p||"").split(/[\\/]/).pop().trim();
+const stemOf=p=>baseName(p).replace(/\.[^.]+$/,"").toLowerCase();
+const cleanMedia=v=>String(v==null?"":v).trim().replace(/^player\s*#?\s*\d+\s*:\s*/i,"");
+
+function readTableSmart(text){
+  // BORIS older exports put metadata lines above the real header: find the first wide line that looks like one
+  const lines=text.split(/\r?\n/);
+  for(let i=0;i<Math.min(lines.length,60);i++){
+    const l=lines[i]; if(!l.trim()) continue; const d=detectDelim(l), n=splitLine(l,d).length;
+    if(n>=3&&/time|start|behavio|status|media/i.test(l)) return readTable(lines.slice(i).join("\n"));
+  }
+  return readTable(text);
+}
+function guessBorisCols(header,rows){
+  const n=header.map(norm), idx=re=>n.map((h,i)=>re.test(h)?i:-1).filter(i=>i>=0), first=a=>a.length?a[0]:-1;
+  const isS=i=>SYNC_RE.test(n[i]), okT=i=>!NOT_TIME_RE.test(n[i]);
+  const c={};
+  c.label=first([...idx(/^behaviou?r$/),...idx(/^behaviou?r(name|code|label)$/),...idx(/^(label|event|eventname|code)$/),
+    ...idx(/behaviou?r/).filter(i=>!/categor|type/.test(n[i]))]);
+  c.modifier=first(idx(/modifier/));
+  c.media=first([...idx(/^media(file)?(path|name)?$/),...idx(/media|video|^source$/).filter(i=>okT(i)&&!/total/.test(n[i]))]);
+  c.obs=first(idx(/^observation(id)?$|observationid/));
+  c.start=first(idx(/start/).filter(i=>!isS(i)&&okT(i)));
+  c.stop=first(idx(/stop|end/).filter(i=>!isS(i)&&okT(i)));
+  c.time=first(idx(/^(time|times|timestamp|timesec)$/).filter(i=>!isS(i)));
+  c.status=-1;
+  for(let i=0;i<header.length&&c.status<0;i++){ const v=new Set(rows.slice(0,500).map(r=>String(r[i]??"").trim().toUpperCase())); if(v.has("START")&&v.has("STOP")) c.status=i; }
+  c.sStart=first(idx(/start/).filter(i=>isS(i)&&okT(i)));
+  c.sStop=first(idx(/stop|end/).filter(i=>isS(i)&&okT(i)));
+  c.sTime=first(idx(/time|stamp|sync/).filter(i=>isS(i)&&okT(i)&&!/start|stop|end/.test(n[i])));
+  if(c.label===c.status) c.label=-1;
+  return c;
+}
+function buildBorisEvents(B){
+  const c=B.cols, num=B.num, cell=(r,i)=>i>=0? r[i] : undefined;
+  const tv=v=>{ if(v==null) return NaN; let x=num(v); if(!Number.isFinite(x)) x=parseTimeStr(v); return x; };
+  const lab=r=>{ let s=(c.label>=0? String(r[c.label]??"").trim() : "")||"event";
+    const m=cell(r,c.modifier); if(m&&String(m).trim()&&!/^none$/i.test(String(m).trim())) s+=` · ${String(m).trim()}`; return s; };
+  const base=r=>({label:lab(r), media:cleanMedia(cell(r,c.media)), obs:String(cell(r,c.obs)??"").trim()});
+  const ev=[];
+  if(c.start>=0||c.sStart>=0){
+    for(const r of B.rows){ const e=base(r);
+      e.m0=tv(cell(r,c.start)); e.m1=tv(cell(r,c.stop)); e.s0=tv(cell(r,c.sStart)); e.s1=tv(cell(r,c.sStop));
+      if(Number.isFinite(e.m0)||Number.isFinite(e.s0)) ev.push(e); }
+  } else if(c.status>=0&&(c.time>=0||c.sTime>=0)){
+    const open=new Map();
+    for(const r of B.rows){ const st=String(r[c.status]??"").trim().toUpperCase(), e=base(r);
+      const m=tv(cell(r,c.time)), s=tv(cell(r,c.sTime)); if(!Number.isFinite(m)&&!Number.isFinite(s)) continue;
+      const key=e.label+"|"+e.media+"|"+e.obs;
+      if(st==="START") open.set(key,{...e,m0:m,s0:s});
+      else if(st==="STOP"&&open.has(key)){ const o=open.get(key); open.delete(key); ev.push({...o,m1:m,s1:s}); }
+      else if(st==="POINT") ev.push({...e,m0:m,m1:m,s0:s,s1:s}); }
+  } else if(c.time>=0||c.sTime>=0){
+    for(const r of B.rows){ const e=base(r); e.m0=e.m1=tv(cell(r,c.time)); e.s0=e.s1=tv(cell(r,c.sTime));
+      if(Number.isFinite(e.m0)||Number.isFinite(e.s0)) ev.push(e); }
+  } else throw new Error("BORIS: could not find start/stop or time columns. Set them under ‘BORIS columns’.");
+  for(const e of ev){ if(!Number.isFinite(e.m1)) e.m1=e.m0; if(!Number.isFinite(e.s1)) e.s1=e.s0; }
+  return ev;
+}
+function buildTrials(){
+  const B=S.boris; const ev=buildBorisEvents(B), map=new Map();
+  for(const e of ev){ const key=baseName(e.media)||e.obs||"all events"; if(!map.has(key)) map.set(key,{key,media:e.media,obs:e.obs,events:[]}); map.get(key).events.push(e); }
+  B.trials=[...map.values()];
+  for(const t of B.trials) t.events.sort((a,b)=>(Number.isFinite(a.m0)?a.m0:a.s0)-(Number.isFinite(b.m0)?b.m0:b.s0));
+  B.nEvents=ev.length;
+}
+
+
+/* ---------------------------------------------------------------- data folder index (read only) */
+const FS={roots:[],files:[]};
+const VIDEO_RE=/\.(mp4|m4v|mov|webm|avi|mkv)$/i, TABLE_RE=/\.(csv|tsv|txt|json)$/i;
+const isBoris=f=>/\.(tsv|csv)$/i.test(f.name)&&(/boris/i.test(f.path)||/_synced\.tsv$/i.test(f.name));
+const isSyncedBoris=f=>/_boris_synced\.(csv|tsv)$/i.test(f.name);
+const dirOf=p=>String(p).split("/").slice(0,-1).join("/");
+async function walkDir(dir,prefix,depth){
+  for await (const [name,h] of dir.entries()){
+    if(name.startsWith(".")||/^(node_modules|__pycache__|\$recycle\.bin|venv|\.venv)$/i.test(name)) continue;
+    if(h.kind==="directory"){ if(depth<12) await walkDir(h,prefix+name+"/",depth+1); }
+    else if(VIDEO_RE.test(name)||TABLE_RE.test(name)) FS.files.push({name,path:prefix+name,h});
+    if(FS.files.length%500===0) $("fsStatus").textContent=`Indexing… ${FS.files.length} files`;
+  }
+}
+async function getFile(f){ return f.file || await f.h.getFile(); }
+let _db=null;
+function idb(){ if(_db) return _db; _db=new Promise((res,rej)=>{ const r=indexedDB.open("pose-frame-picker",1);
+  r.onupgradeneeded=()=>r.result.createObjectStore("kv"); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); return _db; }
+async function kv(k,v){ try{ const db=await idb(); return await new Promise(res=>{ const tx=db.transaction("kv",v===undefined?"readonly":"readwrite");
+  const q= v===undefined? tx.objectStore("kv").get(k) : tx.objectStore("kv").put(v,k); q.onsuccess=()=>res(q.result); q.onerror=()=>res(undefined); }); }catch(e){ return undefined; } }
+
+async function indexRoots(){
+  FS.files=[]; for(const r of FS.roots){ $("fsStatus").textContent=`Indexing ${r.name}…`; await walkDir(r,r.name+"/",0); }
+  afterIndex();
+}
+async function chooseFolder(add){
+  if(!("showDirectoryPicker" in window)){ $("fDir").click(); return; }
+  try{ const h=await window.showDirectoryPicker({mode:"read",id:"posedata"});
+    if(!add) FS.roots=[]; if(!FS.roots.some(r=>r.name===h.name)) FS.roots.push(h);
+    await kv("roots",FS.roots); await indexRoots();
+  }catch(e){ if(e.name!=="AbortError"){ console.error(e); toast(e.message); } }
+}
+async function reconnect(){
+  const roots=await kv("roots")||[]; const ok=[];
+  for(const h of roots){ try{ let p=await h.queryPermission({mode:"read"}); if(p!=="granted") p=await h.requestPermission({mode:"read"}); if(p==="granted") ok.push(h); }catch(e){} }
+  if(!ok.length){ toast("Permission not granted; choose the folder again"); return; }
+  FS.roots=ok; await indexRoots();
+}
+(async()=>{ const roots=await kv("roots"); if(roots&&roots.length){ const b=$("bReconnect"); b.textContent=`Reopen ${roots.map(r=>r.name).join(" + ")}`; b.style.display=""; } })();
+
+
+/* ================================================================ hand topology (Unity XR / Meta joint names in the CSV) */
+const JN=["HandWristRoot","HandStart","HandThumb1","HandThumb2","HandThumb3","HandThumbTip",
+  "HandIndex0","HandIndex1","HandIndex2","HandIndex3","HandIndexTip",
+  "HandMiddle0","HandMiddle1","HandMiddle2","HandMiddle3","HandMiddleTip",
+  "HandRing0","HandRing1","HandRing2","HandRing3","HandRingTip",
+  "HandPinky0","HandPinky1","HandPinky2","HandPinky3","HandPinkyTip"];
+const NJ=JN.length, J=Object.fromEntries(JN.map((n,i)=>[n,i]));
+const FINGERS=[ // name, chain from the wrist; the first link(s) are metacarpal (drawn lighter, inside the palm)
+  {k:"T",name:"thumb", chain:["HandWristRoot","HandThumb1","HandThumb2","HandThumb3","HandThumbTip"], meta:1},
+  {k:"I",name:"index", chain:["HandWristRoot","HandIndex0","HandIndex1","HandIndex2","HandIndex3","HandIndexTip"], meta:2},
+  {k:"M",name:"middle",chain:["HandWristRoot","HandMiddle0","HandMiddle1","HandMiddle2","HandMiddle3","HandMiddleTip"], meta:2},
+  {k:"R",name:"ring",  chain:["HandWristRoot","HandRing0","HandRing1","HandRing2","HandRing3","HandRingTip"], meta:2},
+  {k:"P",name:"little",chain:["HandWristRoot","HandPinky0","HandPinky1","HandPinky2","HandPinky3","HandPinkyTip"], meta:2}];
+const PALM=["HandWristRoot","HandThumb1","HandIndex1","HandMiddle1","HandRing1","HandPinky1","HandPinky0"];
+const TIPS={T:"HandThumbTip",I:"HandIndexTip",M:"HandMiddleTip",R:"HandRingTip",P:"HandPinkyTip"};
+const SIDES=["R","L"], SIDE_NAME={R:"Right",L:"Left"};
+const QC={real:0,interpolated:0,filled_dropout:1,extrapolated:2,missing:3,no_hand_data:3};
+
+/* ================================================================ streaming CSV parse (hand files reach ~125 MB) */
+async function streamCSV(file,onHeader,onRow){
+  const reader=file.stream().pipeThrough(new TextDecoderStream()).getReader();
+  let buf="", header=null, n=0, read=0; const total=file.size||1;
+  for(;;){
+    const {value,done}=await reader.read(); if(value){ buf+=value; read+=value.length; }
+    let i; while((i=buf.indexOf("\n"))>=0){ let line=buf.slice(0,i); buf=buf.slice(i+1); if(line.endsWith("\r")) line=line.slice(0,-1); if(!line) continue;
+      if(!header){ header=line.replace(/^﻿/,"").split(","); onHeader(header); } else { onRow(line.split(","),n++); } }
+    if(done){ if(buf.trim()&&header) onRow(buf.trim().split(","),n++); break; }
+    $("prog").style.width=Math.min(100,100*read/total)+"%"; await new Promise(r=>setTimeout(r,0));
+  }
+  $("prog").style.width="0"; return n;
+}
+async function parseHand(file){
+  let cols=null, ti=-1, qi=-1; const T=[], Q=[], buf={R:[],L:[]};
+  await streamCSV(file,h=>{
+    ti=h.findIndex(c=>/^t_?s$|^time$/i.test(c.trim())); qi=h.findIndex(c=>c.trim().toLowerCase()==="data_quality");
+    if(ti<0) throw new Error("Hand file: no t_s column.");
+    cols={}; for(const s of SIDES) cols[s]=JN.map(n=>["x","y","z"].map(c=>h.indexOf(`${SIDE_NAME[s]}_${n}_${c}`)));
+    if(cols.R.every(j=>j[0]<0)&&cols.L.every(j=>j[0]<0)) throw new Error("Hand file: no Left_/Right_ Hand… joint columns found.");
+  },(r)=>{
+    T.push(+r[ti]); Q.push(qi>=0? (QC[(r[qi]||"").trim().toLowerCase()]??0) : 0);
+    for(const s of SIDES){ const out=new Float32Array(NJ*3); const C=cols[s];
+      for(let j=0;j<NJ;j++) for(let c=0;c<3;c++){ const ci=C[j][c]; const v= ci>=0&&r[ci]!==""? +r[ci] : NaN; out[j*3+c]=Number.isFinite(v)?v:NaN; }
+      buf[s].push(out); }
+  });
+  const N=T.length, H={N,name:file.name,t:Float64Array.from(T),q:Uint8Array.from(Q),X:{},has:{}};
+  for(const s of SIDES){ const X=new Float32Array(N*NJ*3); buf[s].forEach((a,i)=>X.set(a,i*NJ*3)); H.X[s]=X;
+    let ok=0; for(let i=0;i<N;i++) if(Number.isFinite(X[i*NJ*3])) ok++; H.has[s]=ok/N; }
+  H.qCounts=[0,0,0,0]; for(const v of H.q) H.qCounts[v]++;
+  prepHandFrames(H);
+  return H;
+}
+function jp(s,f,j){ const X=S.H.X[s], k=(f*NJ+j)*3; return [X[k],X[k+1],X[k+2]]; }
+function okp(p){ return p&&Number.isFinite(p[0])&&Number.isFinite(p[1])&&Number.isFinite(p[2]); }
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], add=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]], mul=(a,k)=>[a[0]*k,a[1]*k,a[2]*k];
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2], cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const nrm=v=>{ const l=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/l,v[1]/l,v[2]/l]; };
+
+/* Hand-local frame per hand and frame: Y along the hand (wrist -> middle knuckle), X across the knuckles,
+   Z out of the palm. Which side is the palm is fixed once per hand from the data: curled fingertips sit on the
+   palm side of the knuckle plane, and the hands spend most of the trial gripping. X is then oriented so the
+   frame has the same handedness as the world, which keeps hand-local views unmirrored. */
+function rawFrame(s,f){
+  const w=jp(s,f,J.HandWristRoot), m=jp(s,f,J.HandMiddle1), i1=jp(s,f,J.HandIndex1), p1=jp(s,f,J.HandPinky1);
+  if(![w,m,i1,p1].every(okp)) return null;
+  const Y=nrm(sub(m,w)); let X=sub(i1,p1); X=nrm(sub(X,mul(Y,dot(X,Y)))); const Z=nrm(cross(X,Y));
+  return {o:jp(s,f,J.HandStart).every(Number.isFinite)? jp(s,f,J.HandStart) : w, X,Y,Z};
+}
+function prepHandFrames(H){
+  H.palmSign={}; H.xSign={}; H.thumbSign={};
+  for(const s of SIDES){ const S0=S.H; S.H=H; let acc=0,n=0;
+    for(let f=0;f<H.N;f+=Math.max(1,Math.floor(H.N/1500))){ const F=rawFrame(s,f); if(!F) continue;
+      for(const t of ["HandMiddleTip","HandRingTip","HandPinkyTip"]){ const p=jp(s,f,J[t]); if(okp(p)){ acc+=dot(sub(p,F.o),F.Z); n++; } } }
+    H.palmSign[s]= n&&acc<0? -1 : 1;
+    S.H=S0; }
+}
+function handFrame(s,f){
+  const F=rawFrame(s,f); if(!F) return null; const ps=S.H.palmSign[s];
+  let Z=mul(F.Z,ps), X=F.X; // Z now points out of the palm
+  // keep world handedness: det[X,Y,Z] must match det of the identity (+1)
+  if(dot(cross(X,F.Y),Z)<0) X=mul(X,-1);
+  return {o:F.o,X,Y:F.Y,Z};
+}
+
+/* ================================================================ pen (optional, same t_s grid) */
+function parsePenSimple(text,name){
+  const tab=readTable(text), n=tab.header.map(norm), num=tab.num, ix=k=>n.indexOf(k);
+  const it=[ix("ts"),ix("time")].find(i=>i>=0), c=["x","y","z","qw","qx","qy","qz"].map(ix);
+  if(it==null||c.some(i=>i<0)) throw new Error("Pen file: expected t_s, x, y, z, qw, qx, qy, qz.");
+  const R=tab.rows.filter(r=>Number.isFinite(num(r[it]))), N=R.length, P={N,name,t:new Float64Array(N),p:new Float64Array(N*3),q:new Float64Array(N*4),ok:new Uint8Array(N)};
+  R.forEach((r,i)=>{ P.t[i]=num(r[it]); for(let k=0;k<3;k++) P.p[i*3+k]=num(r[c[k]]); for(let k=0;k<4;k++) P.q[i*4+k]=num(r[c[3+k]]);
+    const ident=P.q[i*4]===1&&P.q[i*4+1]===0&&P.q[i*4+2]===0&&P.q[i*4+3]===0, zero=P.p[i*3]===0&&P.p[i*3+1]===0&&P.p[i*3+2]===0;
+    P.ok[i]= !ident&&!zero&&Number.isFinite(P.p[i*3])? 1 : 0; });
+  return P;
+}
+function qRot(qw,qx,qy,qz,v){ const tx=2*(qy*v[2]-qz*v[1]), ty=2*(qz*v[0]-qx*v[2]), tz=2*(qx*v[1]-qy*v[0]);
+  return [v[0]+qw*tx+(qy*tz-qz*ty), v[1]+qw*ty+(qz*tx-qx*tz), v[2]+qw*tz+(qx*ty-qy*tx)]; }
+function penIdx(t){ const P=S.P; if(!P) return -1; const T=P.t; let lo=0,hi=P.N-1; if(t<T[0]-0.05||t>T[hi]+0.05) return -1;
+  while(hi-lo>1){const m=(lo+hi)>>1; if(T[m]<=t) lo=m; else hi=m;} const i=(t-T[lo]<T[hi]-t)?lo:hi; return Math.abs(T[i]-t)<0.06? i : -1; }
+/* trial-name tags (same parser as the pose picker) */
+function tagsOf(str){
+  const s=String(str||"").replace(/\s*([_\-])\s*/g,"$1").toLowerCase(), t={};
+  let m=s.match(/(?:^|[^a-z0-9])p(?:articipant)?[_\- ]?0*(\d{1,3})(?![0-9])/); if(m) t.pid=+m[1];
+  m=s.match(/(?:^|[^a-z])(long|short)(?![a-z])/); if(m) t.length=m[1];
+  m=s.match(/(?:^|[^a-z])(large|small)(?![a-z])/); if(m) t.size=m[1];
+  m=s.match(/(?:^|[^a-z])([a-z]+)[_\- ]?weight(?:ed)?(?![a-z])/); if(m&&m[1]!=="un") t.weight=m[1];
+  else if((m=s.match(/(?:^|[^a-z])(unweighted|balanced|neutral|centred|centered|even|noweight)(?![a-z])/))) t.weight=m[1];
+  m=s.match(/(?:^|[^a-z0-9])a(\d{2,3})(?![0-9])/); if(m) t.angle=+m[1];
+  m=s.match(/(?:^|[^0-9])(\d{8})_(\d{6})(?![0-9])/); if(m) t.session=m[1]+"_"+m[2];
+  return t;
+}
+
+/* Prototype geometry, in the pen's local frame (MX Ink housed in the barrel, pin tip along local +z).
+   Measured from the data: the tip sits ~94 mm ahead of the tracked origin on Long (220 mm) and ~21 mm on
+   Short (150 mm) end effectors, so the barrel's rear is ~127 mm behind the origin. The handle leaves the
+   rear of the barrel towards local -y (palm sits on -y at 90°, straight back at 180°). */
+function gunCfg(){
+  const t=tagsOf(S.stem||""), v=id=>$(id).value;
+  const L= v("gLen")!=="auto"? +v("gLen") : t.length==="long"? 220 : t.length==="short"? 150 : 150;
+  const A= v("gAng")!=="auto"? +v("gAng") : [90,135,180].includes(t.angle)? t.angle : 90;
+  const D= v("gDia")!=="auto"? +v("gDia") : t.size==="large"? 70 : 50;
+  return {L,A,D,src:t, HL:+v("gHL"), rear:+v("gRear"), att:+v("gAtt"), roll:+v("gRoll"), angOff:+v("gAngOff"), BD:+v("gBD")};
+}
+function gunAt(t){
+  const P=S.P; if(!P) return null; const i=penIdx(t); if(i<0||!P.ok[i]) return null;
+  const q=[P.q[i*4],P.q[i*4+1],P.q[i*4+2],P.q[i*4+3]], o=[P.p[i*3],P.p[i*3+1],P.p[i*3+2]], sg=penSign();
+  const z=mul(nrm(qRot(...q,[0,0,1])),sg), y=nrm(qRot(...q,[0,1,0])), x=nrm(qRot(...q,[1,0,0]));
+  const C=gunCfg(), mm=0.001, rear=add(o,mul(z,-C.rear*mm)), front=add(rear,mul(z,C.L*mm));
+  const r=C.roll*Math.PI/180, down=add(mul(y,-Math.cos(r)),mul(x,Math.sin(r)));
+  const th=(C.A+C.angOff)*Math.PI/180, d=nrm(add(mul(z,Math.cos(th)),mul(down,Math.sin(th))));
+  const hs=add(rear,mul(z,C.att*mm)), he=add(hs,mul(d,C.HL*mm));
+  return {o,z,x,y,d,rear,front,hs,he,C};
+}
+function convexHull(P){ const p=P.map(q=>[q[0],q[1]]).sort((a,b)=>a[0]-b[0]||a[1]-b[1]); if(p.length<3) return p;
+  const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]), lo=[], up=[];
+  for(const q of p){ while(lo.length>=2&&cr(lo[lo.length-2],lo[lo.length-1],q)<=0) lo.pop(); lo.push(q); }
+  for(let i=p.length-1;i>=0;i--){ const q=p[i]; while(up.length>=2&&cr(up[up.length-2],up[up.length-1],q)<=0) up.pop(); up.push(q); }
+  up.pop(); lo.pop(); return lo.concat(up); }
+function gripStats(){ // which hand is on the handle / barrel during Place holds (palm centre to cylinder axis)
+  S.grip=null; if(!S.P||!S.H) return; const R={R:{h:[],b:[]},L:{h:[],b:[]}};
+  for(const e of S.events.filter(e=>/^place/i.test(e.label))) for(let f=idxAt(e.t0);f<S.H.N&&S.H.t[f]<=e.t1;f+=3){ const G=gunAt(S.H.t[f]); if(!G) continue;
+    for(const s of SIDES){ const p=jp(s,f,J.HandStart); if(!okp(p)) continue; R[s].h.push(distPtSeg(p,G.hs,G.he)); R[s].b.push(distPtSeg(p,G.rear,G.front)); } }
+  const md=a=>a.length? a.slice().sort((x,y)=>x-y)[a.length>>1] : NaN;
+  S.grip={R:{h:md(R.R.h),b:md(R.R.b)},L:{h:md(R.L.h),b:md(R.L.b)}};
+}
+function gripText(){ const g=S.grip; if(!g) return ""; const f=v=>Number.isFinite(v)? `${Math.round(v*1000)} mm` : "–";
+  const onHandle= Number.isFinite(g.R.h)&&(!Number.isFinite(g.L.h)||g.R.h<g.L.h)? "right" : "left";
+  return ` During Place holds the ${onHandle} hand is on the handle (palm centre to handle axis: right ${f(g.R.h)}, left ${f(g.L.h)}; to barrel: right ${f(g.R.b)}, left ${f(g.L.b)}).`; }
+function penSeg(t,sign){ // barrel axis, rear -> pin tip
+  const G=gunAt(t); if(!G) return null; return sign===penSign()? [G.rear,G.front] : [G.front, add(G.front,mul(G.z,-(G.C.L/1000)))]; }
+function distPtSeg(x,a,b){ const ab=sub(b,a), t=Math.max(0,Math.min(1,dot(sub(x,a),ab)/dot(ab,ab))); return Math.hypot(...sub(x,add(a,mul(ab,t)))); }
+function autoPenSign(){
+  // which way along local z does the pen body lie? Choose the direction that passes closest to the gripping thumb/index
+  const P=S.P, H=S.H; if(!P||!H) return 1; let dp=[],dm=[];
+  for(let f=0;f<H.N;f+=Math.max(1,Math.floor(H.N/800))){ for(const s of SIDES){ const th=jp(s,f,J.HandThumbTip), ix=jp(s,f,J.HandIndexTip); if(!okp(th)||!okp(ix)) continue;
+      const i=penIdx(H.t[f]); if(i<0||!P.ok[i]) continue; const o=[P.p[i*3],P.p[i*3+1],P.p[i*3+2]], zz=nrm(qRot(P.q[i*4],P.q[i*4+1],P.q[i*4+2],P.q[i*4+3],[0,0,1]));
+      const a=[o,add(o,mul(zz,0.15))], b=[o,add(o,mul(zz,-0.15))];
+      const g=Math.min(distPtSeg(th,...a),distPtSeg(ix,...a)), h=Math.min(distPtSeg(th,...b),distPtSeg(ix,...b)); if(Math.min(g,h)<0.06){ dp.push(g); dm.push(h); } } }
+  const md=a=>a.length? a.sort((x,y)=>x-y)[a.length>>1] : NaN, gp=md(dp), gm=md(dm);
+  S.penAuto={sign: gm<gp? -1 : 1, gp, gm, n:dp.length};
+  return S.penAuto.sign;
+}
+function penSign(){ const v=$("penDir").value; return v==="z"? 1 : v==="-z"? -1 : (S.penAuto? S.penAuto.sign : 1); }
+
+/* ================================================================ calibration plane
+   Fitted like 02_flatten_pen_to_plane.py: least-squares plane through the pen position at each BORIS
+   'Point n' event (mean of samples within ±0.1 s). In-plane axes: v = world up projected onto the plane,
+   u = across. If plane_quality_log.csv is in the folder, its normal for this trial is compared. */
+function eigSym3(A){ // Jacobi; returns {vals, vecs (columns)}
+  let a=A.map(r=>r.slice()), V=[[1,0,0],[0,1,0],[0,0,1]];
+  for(let sweep=0;sweep<50;sweep++){ let off=0; for(let p=0;p<3;p++) for(let q=p+1;q<3;q++) off+=a[p][q]**2; if(off<1e-18) break;
+    for(let p=0;p<3;p++) for(let q=p+1;q<3;q++){ if(Math.abs(a[p][q])<1e-15) continue;
+      const th=(a[q][q]-a[p][p])/(2*a[p][q]), t=Math.sign(th||1)/(Math.abs(th)+Math.sqrt(th*th+1)), c=1/Math.sqrt(t*t+1), sn=t*c;
+      for(let k=0;k<3;k++){ const akp=a[k][p], akq=a[k][q]; a[k][p]=c*akp-sn*akq; a[k][q]=sn*akp+c*akq; }
+      for(let k=0;k<3;k++){ const apk=a[p][k], aqk=a[q][k]; a[p][k]=c*apk-sn*aqk; a[q][k]=sn*apk+c*aqk; }
+      for(let k=0;k<3;k++){ const vkp=V[k][p], vkq=V[k][q]; V[k][p]=c*vkp-sn*vkq; V[k][q]=sn*vkp+c*vkq; } } }
+  return {vals:[a[0][0],a[1][1],a[2][2]], vecs:[0,1,2].map(i=>[V[0][i],V[1][i],V[2][i]])};
+}
+function computePlane(){
+  S.plane=null; const P=S.P; if(!P||!S.events.length){ updatePlaneInfo(); return; }
+  const pts=[];
+  for(const e of S.events.filter(e=>/^point/i.test(e.label))){ let acc=[0,0,0],n=0;
+    for(let i=0;i<P.N;i++){ if(P.t[i]<e.t0-0.1) continue; if(P.t[i]>e.t0+0.1) break; if(!P.ok[i]) continue; acc=add(acc,[P.p[i*3],P.p[i*3+1],P.p[i*3+2]]); n++; }
+    if(n) pts.push({p:mul(acc,1/n),label:e.label.replace(/^point\s*/i,"P")}); }
+  if(pts.length<3){ updatePlaneInfo(`Only ${pts.length} calibration point(s) with pen data, so no plane.`); return; }
+  const c=mul(pts.reduce((a,q)=>add(a,q.p),[0,0,0]),1/pts.length), C=[[0,0,0],[0,0,0],[0,0,0]];
+  for(const q of pts){ const d=sub(q.p,c); for(let i=0;i<3;i++) for(let j=0;j<3;j++) C[i][j]+=d[i]*d[j]; }
+  const E=eigSym3(C), k=E.vals.indexOf(Math.min(...E.vals)); let n=nrm(E.vecs[k]);
+  // orient the normal toward the participant: the side where the hands spend most time
+  if(S.H){ let sgn=0; for(let f=0;f<S.H.N;f+=Math.max(1,Math.floor(S.H.N/300))){ const w=jp("R",f,J.HandStart); if(okp(w)) sgn+=Math.sign(dot(sub(w,c),n)); } if(sgn<0) n=mul(n,-1); }
+  let v=sub([0,1,0],mul(n,n[1])); v= Math.hypot(...v)>1e-3? nrm(v) : nrm(cross(n,[1,0,0])); const u=nrm(cross(v,n));
+  const uv=pts.map(q=>[dot(sub(q.p,c),u),dot(sub(q.p,c),v)]), m=0.06;
+  const ext=[Math.min(...uv.map(x=>x[0]))-m,Math.max(...uv.map(x=>x[0]))+m,Math.min(...uv.map(x=>x[1]))-m,Math.max(...uv.map(x=>x[1]))+m];
+  const resid=Math.sqrt(pts.reduce((a,q)=>a+dot(sub(q.p,c),n)**2,0)/pts.length);
+  S.plane={c,n,u,v,ext,pts,resid};
+  if(S.planeLog&&S.stem){ const L=matchPlaneLog(S.stem); if(L){ const ang=Math.acos(Math.min(1,Math.abs(dot(nrm(L.n),n))))*180/Math.PI; S.plane.log={ang,stem:L.stem}; } }
+  // tip offset along the pen axis: during Place holds the tip is on the plane, so the distance from the
+  // tracked origin to the plane along the axis is the origin->tip length
+  S.tipLen=null; if(S.P&&S.events.length){ const L=[];
+    for(const e of S.events.filter(e=>/^place/i.test(e.label))) for(let i=0;i<S.P.N;i++){ if(S.P.t[i]<e.t0) continue; if(S.P.t[i]>e.t1) break; const A=penAim(S.P.t[i]); if(A&&A.hit) L.push(Math.hypot(...sub(A.hit,A.p))); }
+    if(L.length>20){ L.sort((a,b)=>a-b); S.tipLen={med:L[L.length>>1],q1:L[Math.floor(L.length*0.25)],q3:L[Math.floor(L.length*0.75)],n:L.length};
+    } }
+  updatePlaneInfo();
+}
+function matchPlaneLog(stem){ const rows=S.planeLog; if(!rows) return null; const st=stem.toLowerCase().replace(/\s+/g,"");
+  const strip=x=>x.toLowerCase().replace(/\s+/g,"").replace(/_(\d{8}|12345678)_\d{6}$/,"");
+  const hit=[...rows].reverse().find(r=>r.stem.toLowerCase().replace(/\s+/g,"")===st)||[...rows].reverse().find(r=>strip(r.stem)===st);
+  return hit||null; }
+function loadPlaneLog(text){ const tab=readTable(text), h=tab.header, ix=k=>h.indexOf(k); if(ix("trial_stem")<0) return;
+  S.planeLog=tab.rows.map(r=>({stem:r[ix("trial_stem")],n:["normal_x","normal_y","normal_z"].map(k=>+r[ix(k)])})).filter(r=>r.n.every(Number.isFinite)); }
+function updatePlaneInfo(msg){ const P=S.plane;
+  $("planeInfo").textContent= msg? msg : !P? (S.P? "Needs the trial's BORIS Point events to fit the plane." : "Load the pen data to fit the calibration plane.")
+    : `Plane fitted through ${P.pts.length} calibration points (RMS ${(P.resid*1000).toFixed(1)} mm off-plane).`+(P.log?` Matches plane_quality_log.csv to ${P.log.ang.toFixed(2)}°.`:S.planeLog?" No matching row in plane_quality_log.csv.":"")
+    +(S.tipLen?` During Place holds the plane is ${(S.tipLen.med*1000).toFixed(0)} mm ahead of the tracked origin (IQR ${(S.tipLen.q1*1000).toFixed(0)}–${(S.tipLen.q3*1000).toFixed(0)}); the prototype model puts the pin tip at ${gunCfg().L-gunCfg().rear} mm.`:""); }
+function penAim(t){ // pen axis vs the plane: angle to the normal (0 = perpendicular), and where the axis meets the plane
+  const P=S.P, Pl=S.plane; if(!P||!Pl) return null; const i=penIdx(t); if(i<0||!P.ok[i]) return null;
+  const p=[P.p[i*3],P.p[i*3+1],P.p[i*3+2]], a=nrm(qRot(P.q[i*4],P.q[i*4+1],P.q[i*4+2],P.q[i*4+3],[0,0,1]));
+  const ang=Math.acos(Math.min(1,Math.abs(dot(a,Pl.n))))*180/Math.PI, dn=dot(a,Pl.n); if(Math.abs(dn)<1e-6) return {p,ang,hit:null};
+  const s=dot(sub(Pl.c,p),Pl.n)/dn, hit=add(p,mul(a,s)), hu=dot(sub(hit,Pl.c),Pl.u), hv=dot(sub(hit,Pl.c),Pl.v);
+  return {p,ang,hit,dist:Math.abs(dot(sub(p,Pl.c),Pl.n)),hu,hv};
+}
+
+/* ================================================================ camera */
+function presetList(){
+  if($("space").value==="hand") return [["palm","Palm",0,0],["back","Back",180,0],["thumb","Thumb side",90,0],["little","Little-finger side",-90,0],["tips","Fingertips",0,89],["wrist","From the wrist",0,-89]];
+  return [["front","Front",180,0],["side","Side",90,0],["side2","Other side",-90,0],["top","Top",180,89],["iso","Iso",210,25],["iso2","Iso 2",150,25]];
+}
+function thumbAz(){ // in hand-local space the thumb may sit on +X or -X depending on the hand; aim 'Thumb side' at it
+  const s=followSide(); if(!S.H||!s) return 90; const F=handFrame(s,S.f), th=jp(s,S.f,J.HandThumbTip); if(!F||!okp(th)) return 90;
+  return dot(sub(th,F.o),F.X)>=0? 90 : -90; }
+function renderPresets(){
+  $("presets").innerHTML=presetList().map(([k,l],i)=>`<button data-p="${k}" title="key ${i+1}">${l}</button>`).join("");
+  $("spaceInfo").textContent= $("space").value==="hand"? "Hand-local: the followed hand stays still and upright (fingers up), so the grip shape is easy to compare across frames." : "World: Unity coordinates, y up. The hand moves through the view unless the camera follows it.";
+}
+function applyPreset(k){ const p=presetList().find(x=>x[0]===k); if(!p) return; let az=p[2];
+  if($("space").value==="hand"&&(k==="thumb"||k==="little")) az= k==="thumb"? thumbAz() : -thumbAz();
+  setAngles(az,p[3]); }
+function setAngles(az,el){ S.cam.az=((az+540)%360)-180; S.cam.el=clamp(el,-89,89);
+  $("az").value=Math.round(S.cam.az); $("el").value=Math.round(S.cam.el); $("azV").textContent=`${Math.round(S.cam.az)}°`; $("elV").textContent=`${Math.round(S.cam.el)}°`; draw(); }
+function camBasis(){
+  const az=S.cam.az*Math.PI/180, el=S.cam.el*Math.PI/180, rl=S.cam.roll*Math.PI/180;
+  const c=[Math.cos(el)*Math.sin(az),Math.sin(el),Math.cos(el)*Math.cos(az)], f=mul(c,-1), up=[0,1,0];
+  let r= $("hand").value==="left"? nrm(cross(up,f)) : nrm(cross(f,up)); const fu=dot(f,up); let u=nrm(sub(up,mul(f,fu)));
+  if(rl){ const cr=Math.cos(rl), sr=Math.sin(rl), r2=add(mul(r,cr),mul(u,sr)), u2=sub(mul(u,cr),mul(r,sr)); r=r2; u=u2; }
+  return {r,u,f};
+}
+function followSide(){ const v=$("follow").value; if(v==="R"||v==="L") return v; const sh=$("show").value; return sh==="L"? "L" : "R"; }
+function viewSpace(f){
+  // returns a function world->view-space point, and the target in view space
+  const space=$("space").value, fs=followSide();
+  let F=null;
+  if(space==="hand"){ F=handFrame(fs,f); if(F) S.lastFrame=F; else F=S.lastFrame||null; }
+  const toV= F? p=>{ const d=sub(p,F.o); return [dot(d,F.X),dot(d,F.Y),dot(d,F.Z)]; } : p=>p;
+  let tgt=[0,0,0]; const fv=$("follow").value;
+  const centre=s=>{ const o=jp(s,f,J.HandStart).every(Number.isFinite)? jp(s,f,J.HandStart) : jp(s,f,J.HandWristRoot); if(okp(o)){ S.lastTarget[s]=o; return o; } return S.lastTarget[s]; };
+  if(F) tgt=[0,0.035,0];
+  else if(fv==="R"||fv==="L"){ const c=centre(fv); if(c) tgt=c; }
+  else if(fv==="B"){ const a=centre("R"), b=centre("L"); tgt= a&&b? mul(add(a,b),0.5) : (a||b||[0,0,0]); if($("space").value==="hand") tgt=toV(tgt); }
+  else { if(!S.fixedTarget){ const c=centre(fs); S.fixedTarget=c||[0,0,0]; } tgt=S.fixedTarget; }
+  return {toV,tgt,F};
+}
+function projector(W,H,f){
+  const {r,u,f:fw}=camBasis(), V=viewSpace(f), persp=$("proj").value==="persp";
+  const span=(+$("viewMM").value||260)/1000, sc=Math.min(W,H)/span, D=span*(+$("fov").value||2);
+  const M=p=>{ const v=V.toV(p), d=sub(v,V.tgt); let x=dot(d,r), y=dot(d,u); const z=dot(d,fw);
+    if(persp){ const k=D/Math.max(D*0.05,D+z); x*=k; y*=k; } return [W/2+x*sc+S.cam.panX*W, H/2-y*sc+S.cam.panY*H, z]; };
+  M.scale=sc; M.persp=persp; M.basis={r,u}; M.F=V.F; return M;
+}
+
+/* ================================================================ colours */
+function hexmix(a,b,t){ const h=s=>[1,3,5].map(i=>parseInt(s.slice(i,i+2),16)); const A=h(a),B=h(b); return "#"+A.map((v,i)=>Math.round(v+(B[i]-v)*t).toString(16).padStart(2,"0")).join(""); }
+const DISTINCT={T:"#c0392b",I:"#eb6834",M:"#d4a017",R:"#2e86ab",P:"#7b5ea7"};
+function fingerColour(k,base){
+  const m=$("cMode").value; if(m==="single") return base; if(m==="distinct") return DISTINCT[k];
+  return {T:hexmix(base,"#000000",0.45),I:hexmix(base,"#000000",0.22),M:base,R:hexmix(base,"#ffffff",0.18),P:hexmix(base,"#ffffff",0.34)}[k];
+}
+
+/* ================================================================ scene -> display list */
+function scene(W,H,f){
+  const ops=[]; if(!S.H) return ops;
+  const M=projector(W,H,f), u=Math.min(W,H)/600, dark=$("bg").value==="dark", bgc=dark?"#1a1a19":"#ffffff", ink=dark?"#e8e7e3":"#52514e";
+  const base=$("col").value, lw=+$("lw").value*u, jr=+$("jr").value*u, halo=+$("halo").value*u, dfade=+$("depth").value, palmA=+$("palm").value;
+  const show=$("show").value, sides= show==="B"? ["R","L"] : [show], fs=followSide(), font=11*u;
+  const items=[]; // {z, draw(ops)}
+  const dropped= $("flagDrop").checked&&S.H.q[f]===1;
+  const Pl=S.plane, planeFill=dark?"#2a2a28":"#f1f0ec", planeLine=dark?"#3a3a38":"#d9d8d3", planeEdge=dark?"#55554f":"#b8b7b1";
+  if($("sPlane").checked&&Pl){ const [u0,u1,v0,v1]=Pl.ext, at=(a,b)=>add(Pl.c,add(mul(Pl.u,a),mul(Pl.v,b)));
+    const pa=+$("planeA").value;
+    ops.push({k:"poly",pts:[at(u0,v0),at(u1,v0),at(u1,v1),at(u0,v1)].map(M),fill:planeFill,fa:pa});
+    const g=Math.max(0.005,(+$("planeGrid").value||50)/1000), gc=planeLine;
+    for(let x=Math.ceil(u0/g)*g;x<=u1+1e-9;x+=g) ops.push({k:"line",a:M(at(x,v0)),b:M(at(x,v1)),c:gc,w:0.7*u,op:0.8});
+    for(let y=Math.ceil(v0/g)*g;y<=v1+1e-9;y+=g) ops.push({k:"line",a:M(at(u0,y)),b:M(at(u1,y)),c:gc,w:0.7*u,op:0.8});
+    const cn=[at(u0,v0),at(u1,v0),at(u1,v1),at(u0,v1),at(u0,v0)].map(M); ops.push({k:"pl",pts:cn,c:planeEdge,w:1*u,op:1});
+    for(const q of Pl.pts){ const m=M(q.p); ops.push({k:"circ",x:m[0],y:m[1],r:3.2*u,fill:bgc,stroke:ink,w:1.1*u});
+      if($("sLabels").checked) ops.push({k:"text",x:m[0]+5*u,y:m[1]-5*u,s:q.label,size:font*0.85,c:ink}); }
+    if($("sLabels").checked){ const m=M(at(u0,v1)); ops.push({k:"text",x:m[0]+4*u,y:m[1]-5*u,s:"jig plane",size:font*0.9,c:ink}); } }
+  const addHand=(s,ff,alpha,ghost)=>{
+    const P=JN.map((_,j)=>{ const p=jp(s,ff,j); return okp(p)? M(p) : null; }); if(!P[J.HandWristRoot]) return false;
+    const fadeOther= show==="B"&&$("other").checked&&s!==fs;
+    const a0=alpha*(fadeOther?0.45:1);
+    // palm
+    const pp=PALM.map(n=>P[J[n]]).filter(Boolean);
+    if(palmA>0&&pp.length>=4&&!ghost){ const z=pp.reduce((x,p)=>x+p[2],0)/pp.length; items.push({z:z+1e-4,op:{k:"poly",pts:pp,fill:fingerColour("M",base),fa:palmA*a0,stroke:null}}); }
+    // each finger is one continuous stroke (outline + colour) so its own outline never cuts it;
+    // the metacarpal part inside the palm is a thinner, lighter stroke
+    for(const F of FINGERS){ const c=fingerColour(F.k,base);
+      const pts=F.chain.map(n=>P[J[n]]), meta=pts.slice(0,F.meta+1), digit=pts.slice(F.meta);
+      for(const [arr,isMeta] of [[meta,true],[digit,false]]){ const q=arr.filter(Boolean); if(q.length<2) continue;
+        const z= isMeta? Math.max(...q.map(p=>p[2]))+1e-3 : q.reduce((x,p)=>x+p[2],0)/q.length;
+        items.push({z,seg:{pts:q,c: isMeta? hexmix(c,dark?"#000000":"#ffffff",0.4) : c, w: isMeta? lw*0.55 : lw, alpha:a0, ghost, meta:isMeta, dash: dropped&&!ghost}}); } }
+    if(jr>0&&!ghost) for(const F of FINGERS){ const c=fingerColour(F.k,base); const ch=F.chain.slice(F.meta);
+      // joints sit on top of their own finger (same depth key, drawn just after it)
+      const q=ch.map(n=>P[J[n]]).filter(Boolean), z=q.reduce((x,p)=>x+p[2],0)/(q.length||1);
+      ch.forEach((n,i)=>{ const p=P[J[n]]; if(p) items.push({z:z-1e-5,op:{k:"circ",x:p[0],y:p[1],r: i===ch.length-1? jr*1.25 : jr,fill: i===ch.length-1? c : bgc,stroke:c,w:Math.max(1,lw*0.35),op:a0}}); }); }
+    if($("tips").checked&&!ghost&&$("sLabels").checked) for(const [k,n] of Object.entries(TIPS)){ const p=P[J[n]]; if(p) items.push({z:-1e9,op:{k:"text",x:p[0]+5*u,y:p[1]-5*u,s:k,size:font*0.95,c:fingerColour(k,base),weight:600}}); }
+    return true;
+  };
+  // ghosts
+  const ng=+$("ghost").value|0, gs=Math.max(0.02,+$("ghostStep").value||0.2);
+  for(let g=ng;g>=1;g--){ const ff=idxAt(S.H.t[f]-g*gs); if(ff===f) continue; for(const s of sides) addHand(s,ff,0.12+0.3*(1-g/(ng+1)),true); }
+  const drawn={}; for(const s of sides) drawn[s]=addHand(s,f,1,false);
+  // pen
+  if($("sPen").checked&&S.P){ const G=gunAt(S.H.t[f]); if(G){ const gc="#1baf7a", gd=hexmix(gc,"#000000",0.35), gop=+$("gOp").value;
+      /* true 3D cylinders: each end is a circle in the plane perpendicular to the cylinder axis, built from the
+         pen's own orientation (barrel: pen local x/y; handle: pen x made perpendicular to the handle axis),
+         then projected through the camera, so caps appear as correctly oriented ellipses. The body is the
+         convex hull of both projected rings; the cap facing the camera is drawn on top. */
+      const NR=40;
+      const cyl=(a3,b3,diaMM,ax,e1)=>{ const r=diaMM/2000; e1=nrm(sub(e1,mul(ax,dot(e1,ax)))); const e2=cross(ax,e1);
+        const ring=c=>{ const out=[]; for(let k=0;k<NR;k++){ const t=2*Math.PI*k/NR; out.push(M(add(c,add(mul(e1,r*Math.cos(t)),mul(e2,r*Math.sin(t)))))); } return out; };
+        const ra=ring(a3), rb=ring(b3), hull=convexHull(ra.concat(rb)), A=M(a3), B=M(b3), z=(A[2]+B[2])/2;
+        // cap faces camera if stepping outward along its normal moves towards the viewer (smaller depth)
+        const eps=r*0.5, visA=M(add(a3,mul(ax,-eps)))[2]<A[2], visB=M(add(b3,mul(ax,eps)))[2]<B[2];
+        const caps=[]; if(visA) caps.push(ra); if(visB) caps.push(rb);
+        const lw1=Math.max(1,1.1*u);
+        items.push({z,op:{k:"group",ops:[
+          {k:"poly",pts:hull,fill:gc,fa:gop},
+          ...caps.map(rg=>({k:"poly",pts:rg,fill:gd,fa:gop*0.45})),
+          ...caps.map(rg=>({k:"pl",pts:rg.concat([rg[0]]),c:gd,w:lw1,op:0.85})),
+          {k:"pl",pts:hull.concat([hull[0]]),c:gd,w:lw1*1.1,op:0.95}]}}); };
+      cyl(G.rear,G.front,G.C.BD,G.z,G.x); cyl(G.hs,G.he,G.C.D,G.d,G.x);
+      const T=M(G.front); items.push({z:T[2]-1e-3,op:{k:"circ",x:T[0],y:T[1],r:Math.max(2.5*u,lw*0.6),fill:gd,stroke:bgc,w:Math.max(1,0.8*u)}});
+      if($("gPen").checked){ const a=M(add(G.o,mul(G.z,-0.06))), b=M(add(G.o,mul(G.z,0.06))); items.push({z:(a[2]+b[2])/2-1e-3,op:{k:"line",a,b,c:gd,w:Math.max(1.5,lw*0.5),cap:"round"}}); }
+      if($("sLabels").checked&&$("tips").checked) items.push({z:-1e9,op:{k:"text",x:T[0]+6*u,y:T[1]+12*u,s:"pin tip",size:font*0.85,c:gd}}); } }
+  // depth-sorted painting with halos (far first); depth fading toward the background
+  const zs=items.filter(i=>i.seg&&!i.seg.meta).map(i=>i.z), zmin=Math.min(...zs), zmax=Math.max(...zs), zr=(zmax-zmin)||1;
+  items.sort((a,b)=>b.z-a.z);
+  for(const it of items){
+    if(it.seg){ const s=it.seg, depthT= dfade? clamp((it.z-zmin)/zr,0,1) : 0, c=hexmix(s.c,bgc,dfade*depthT*0.85);
+      const op=s.alpha*(s.ghost?0.6:1);
+      if(halo>0&&!s.ghost) ops.push({k:"pl",pts:s.pts,c:bgc,w:s.w+2*halo,op});
+      ops.push({k:"pl",pts:s.pts,c,w:s.w*(s.ghost?0.7:1),op,dash:s.dash?[s.w*1.2,s.w*1.4]:null}); }
+    else ops.push(it.op);
+  }
+  // aim ray: pen axis continued to where it meets the calibration plane
+  if($("sAim").checked&&$("sPen").checked&&S.plane){ const A=penAim(S.H.t[f]); if(A&&A.hit){ const G=gunAt(S.H.t[f]), h=M(A.hit), cc=hexmix("#1baf7a","#000000",0.3);
+      const start= G? G.front : A.p; ops.push({k:"line",a:M(start),b:h,c:cc,w:1.3*u,op:0.9,dash:[4*u,3*u]});
+      const r=6*u; ops.push({k:"circ",x:h[0],y:h[1],r,fill:null,stroke:cc,w:1.4*u}); ops.push({k:"line",a:[h[0]-r*1.6,h[1]],b:[h[0]+r*1.6,h[1]],c:cc,w:1.1*u}); ops.push({k:"line",a:[h[0],h[1]-r*1.6],b:[h[0],h[1]+r*1.6],c:cc,w:1.1*u});
+      if($("sLabels").checked) ops.push({k:"text",x:h[0]+9*u,y:h[1]+14*u,s:`${A.ang.toFixed(1)}° off perpendicular`,size:font*0.9,c:cc}); } }
+  // fingertip trails (on top, thin)
+  const tr=+$("trail").value; if(tr>0){ const which=$("trailTips").value==="all"? Object.keys(TIPS) : $("trailTips").value.split("");
+    const f0=idxAt(S.H.t[f]-tr);
+    for(const s of sides) for(const k of which){ const pts=[]; for(let g=f0;g<=f;g++){ const p=jp(s,g,J[TIPS[k]]); if(okp(p)) pts.push(M(p)); else if(pts.length>1){ ops.push({k:"pl",pts:pts.splice(0),c:fingerColour(k,base),w:Math.max(1,lw*0.35),op:0.7}); } }
+      if(pts.length>1) ops.push({k:"pl",pts,c:fingerColour(k,base),w:Math.max(1,lw*0.35),op:0.7}); } }
+  // axes triad
+  if($("sAxes").checked){ const {r,u:uu}=M.basis, o=[38*u,H-34*u], L=24*u, hl=$("space").value==="hand";
+    const ax= hl? [[[1,0,0],"across"],[[0,1,0],"fingers"],[[0,0,1],"palm"]] : [[[1,0,0],"x"],[[0,1,0],"y (up)"],[[0,0,1],"z"]];
+    for(const [e,name] of ax){ const dx=dot(e,r), dy=dot(e,uu), end=[o[0]+dx*L,o[1]-dy*L]; ops.push({k:"line",a:o,b:end,c:ink,w:1.2*u,cap:"round"});
+      if(Math.hypot(dx,dy)>0.2&&$("sLabels").checked) ops.push({k:"text",x:end[0]+(dx>=0?3:-3)*u,y:end[1]+(dy>=0?-2:9)*u,s:name,size:font*0.85,c:ink,anchor:dx>=0?"start":"end"}); } }
+  // scale bar
+  if($("sScale").checked&&!M.persp){ const cand=[5,10,20,25,50,100,200,500]; let mm=cand[0]; for(const c of cand) if(c/1000*M.scale<=W*0.2) mm=c;
+    const px=mm/1000*M.scale, x1=W-16*u, x0=x1-px, y=H-18*u;
+    ops.push({k:"line",a:[x0,y],b:[x1,y],c:ink,w:1.6*u}); ops.push({k:"line",a:[x0,y-4*u],b:[x0,y+4*u],c:ink,w:1.2*u}); ops.push({k:"line",a:[x1,y-4*u],b:[x1,y+4*u],c:ink,w:1.2*u});
+    if($("sLabels").checked) ops.push({k:"text",x:(x0+x1)/2,y:y-6*u,s:`${mm} mm`,size:font,c:ink,anchor:"middle"}); }
+  if($("sLabels").checked){ const miss=sides.filter(s=>!drawn[s]).map(s=>SIDE_NAME[s].toLowerCase()+" hand not tracked");
+    if(miss.length) ops.push({k:"text",x:W/2,y:22*u,s:miss.join(" · "),size:font,c:"#a2461d",anchor:"middle"}); }
+  return ops;
+}
+
+/* ================================================================ painters (canvas + SVG) */
+function paint(ctx,W,H,ops){
+  ctx.save(); ctx.clearRect(0,0,W,H);
+  const bg=$("bg").value; if(bg==="white"){ctx.fillStyle="#fff";ctx.fillRect(0,0,W,H);} else if(bg==="dark"){ctx.fillStyle="#1a1a19";ctx.fillRect(0,0,W,H);}
+  ctx.lineJoin="round";
+  ops=flatOps(ops);
+  for(const o of ops){ ctx.globalAlpha=o.op??1; ctx.setLineDash(o.dash||[]);
+    if(o.k==="line"){ ctx.strokeStyle=o.c; ctx.lineWidth=o.w; ctx.lineCap=o.cap||"butt"; ctx.beginPath(); ctx.moveTo(o.a[0],o.a[1]); ctx.lineTo(o.b[0],o.b[1]); ctx.stroke(); }
+    else if(o.k==="pl"){ ctx.strokeStyle=o.c; ctx.lineWidth=o.w; ctx.lineCap="round"; ctx.beginPath(); o.pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1])); ctx.stroke(); }
+    else if(o.k==="poly"){ ctx.beginPath(); o.pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1])); ctx.closePath(); if(o.fill){ ctx.globalAlpha=o.fa??1; ctx.fillStyle=o.fill; ctx.fill(); } }
+    else if(o.k==="circ"){ ctx.beginPath(); ctx.arc(o.x,o.y,o.r,0,Math.PI*2); if(o.fill){ctx.fillStyle=o.fill;ctx.fill();} if(o.stroke){ctx.strokeStyle=o.stroke;ctx.lineWidth=o.w;ctx.stroke();} }
+    else if(o.k==="text"){ ctx.fillStyle=o.c; ctx.font=`${o.weight||400} ${o.size}px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif`; ctx.textAlign=o.anchor==="middle"?"center":o.anchor==="end"?"right":"left"; ctx.fillText(o.s,o.x,o.y); } }
+  ctx.restore();
+}
+function flatOps(ops){ const out=[]; for(const o of ops){ if(o.k==="group") out.push(...flatOps(o.ops)); else out.push(o); } return out; }
+function toSVG(W,H,ops){ ops=flatOps(ops);
+  const f=v=>+v.toFixed(2), st=o=>`stroke="${o.c}" stroke-width="${f(o.w)}"${o.op!=null&&o.op!==1?` stroke-opacity="${o.op}"`:""}${o.dash&&o.dash.length?` stroke-dasharray="${o.dash.map(f).join(" ")}"`:""}`;
+  const out=[`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Helvetica, Arial, sans-serif">`];
+  const bg=$("bg").value; if(bg!=="transparent") out.push(`<rect width="${W}" height="${H}" fill="${bg==="white"?"#ffffff":"#1a1a19"}"/>`);
+  for(const o of ops){
+    if(o.k==="line") out.push(`<line x1="${f(o.a[0])}" y1="${f(o.a[1])}" x2="${f(o.b[0])}" y2="${f(o.b[1])}" ${st(o)} stroke-linecap="${o.cap||"butt"}"/>`);
+    else if(o.k==="pl") out.push(`<polyline points="${o.pts.map(p=>f(p[0])+","+f(p[1])).join(" ")}" fill="none" ${st(o)} stroke-linejoin="round" stroke-linecap="round"/>`);
+    else if(o.k==="poly") out.push(`<polygon points="${o.pts.map(p=>f(p[0])+","+f(p[1])).join(" ")}" fill="${o.fill||"none"}" fill-opacity="${o.fa??1}" stroke="none"/>`);
+    else if(o.k==="circ") out.push(`<circle cx="${f(o.x)}" cy="${f(o.y)}" r="${f(o.r)}" fill="${o.fill||"none"}"${o.op!=null&&o.op!==1?` opacity="${o.op}"`:""} stroke="${o.stroke||"none"}" stroke-width="${f(o.w||0)}"/>`);
+    else if(o.k==="text") out.push(`<text x="${f(o.x)}" y="${f(o.y)}" font-size="${f(o.size)}" font-weight="${o.weight||400}" fill="${o.c}" text-anchor="${o.anchor||"start"}">${escapeHTML(o.s)}</text>`); }
+  out.push("</svg>"); return out.join("\n");
+}
+
+/* ================================================================ stage + interaction */
+const stage=$("stage"), sctx=stage.getContext("2d");
+function layoutStage(){ const wrap=$("stageWrap"), A=+$("aspect").value||1;
+  let w=wrap.clientWidth-24, h=w/A; if(h>wrap.clientHeight-24){ h=wrap.clientHeight-24; w=h*A; }
+  w=Math.max(60,Math.floor(w)); h=Math.max(60,Math.floor(h)); const dpr=window.devicePixelRatio||1;
+  stage.style.width=w+"px"; stage.style.height=h+"px"; stage.width=Math.round(w*dpr); stage.height=Math.round(h*dpr);
+  stage.style.background= $("bg").value==="white"?"#fff": $("bg").value==="dark"?"#1a1a19":""; draw(); }
+function draw(){ if(S.H) paint(sctx,stage.width,stage.height,scene(stage.width,stage.height,S.f)); else sctx.clearRect(0,0,stage.width,stage.height);
+  $("viewV").textContent=`${$("viewMM").value}`; $("rollV").textContent=`${$("roll").value}°`; drawTimeline(); updateReadout(); }
+let drag=null;
+stage.addEventListener("pointerdown",e=>{ stage.setPointerCapture(e.pointerId); drag={x:e.clientX,y:e.clientY,az:S.cam.az,el:S.cam.el,px:S.cam.panX,py:S.cam.panY,pan:e.shiftKey||e.button===2}; });
+stage.addEventListener("pointermove",e=>{ if(!drag) return; const dx=e.clientX-drag.x, dy=e.clientY-drag.y, r=stage.getBoundingClientRect();
+  if(drag.pan){ S.cam.panX=drag.px+dx/r.width; S.cam.panY=drag.py+dy/r.height; draw(); }
+  else { const s=$("hand").value==="left"? 1 : -1; setAngles(drag.az-dx*0.4*s,drag.el+dy*0.4); } });
+stage.addEventListener("pointerup",()=>drag=null);
+stage.addEventListener("contextmenu",e=>e.preventDefault());
+stage.addEventListener("wheel",e=>{ e.preventDefault(); const el=$("viewMM"); const v=clamp((+el.value)*Math.exp(e.deltaY*0.0015),+el.min,+el.max);
+  // zoom about the cursor: keep the point under the mouse fixed
+  const r=stage.getBoundingClientRect(), mx=(e.clientX-r.left)/r.width-0.5, my=(e.clientY-r.top)/r.height-0.5, k=(+el.value)/v;
+  S.cam.panX=mx-(mx-S.cam.panX)*k; S.cam.panY=my-(my-S.cam.panY)*k; el.value=v; draw(); },{passive:false});
+
+/* ================================================================ frames, timeline, events */
+function idxAt(t){ const T=S.H.t; let lo=0,hi=S.H.N-1; if(t<=T[0]) return 0; if(t>=T[hi]) return hi;
+  while(hi-lo>1){const m=(lo+hi)>>1; if(T[m]<=t) lo=m; else hi=m;} return (t-T[lo]<T[hi]-t)?lo:hi; }
+function setFrame(f){ if(!S.H) return; S.f=clamp(f|0,0,S.H.N-1); $("scrub").value=S.f; draw(); }
+function sigCompute(){
+  const H=S.H, kind=$("tlSig").value, s=followSide(), v=new Float32Array(H.N);
+  for(let f=0;f<H.N;f++){
+    if(kind==="ap"){ const a=jp(s,f,J.HandThumbTip), b=jp(s,f,J.HandIndexTip); v[f]= okp(a)&&okp(b)? Math.hypot(...sub(a,b))*1000 : NaN; }
+    else if(kind==="speed"){ const g=Math.max(0,f-1), a=jp(s,f,J.HandStart), b=jp(s,g,J.HandStart), dt=H.t[f]-H.t[g]; v[f]= okp(a)&&okp(b)&&dt>0? Math.hypot(...sub(a,b))/dt*1000 : NaN; }
+    else if(kind==="perp"){ const A=penAim(H.t[f]); v[f]= A? A.ang : NaN; }
+    else { const sg=S.P? penSeg(H.t[f],penSign()) : null, th=jp(s,f,J.HandThumbTip), ix=jp(s,f,J.HandIndexTip);
+      v[f]= sg&&okp(th)&&okp(ix)? Math.min(distPtSeg(th,...sg),distPtSeg(ix,...sg))*1000 : NaN; } }
+  if(kind==="speed"){ const o=new Float32Array(H.N), k=4; for(let i=0;i<H.N;i++){ let a=0,c=0; for(let j=Math.max(0,i-k);j<=Math.min(H.N-1,i+k);j++) if(Number.isFinite(v[j])){a+=v[j];c++;} o[i]=c?a/c:NaN; } return o; }
+  return v;
+}
+const tl=$("timeline"), tctx=tl.getContext("2d");
+function drawTimeline(){
+  const dpr=window.devicePixelRatio||1, W=tl.clientWidth, H=tl.clientHeight;
+  if(tl.width!==Math.round(W*dpr)||tl.height!==Math.round(H*dpr)){ tl.width=Math.round(W*dpr); tl.height=Math.round(H*dpr); }
+  const c=tctx; c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,W,H); if(!S.H) return;
+  const D=S.H, padL=8, padR=8, top=8, bot=18, w=W-padL-padR, h=H-top-bot, T0=D.t[0], T1=D.t[D.N-1], X=t=>padL+(t-T0)/((T1-T0)||1)*w;
+  const css=k=>getComputedStyle(document.documentElement).getPropertyValue(k);
+  S.events.forEach(e=>{ const a=X(e.t0), b=X(e.t1); c.fillStyle=/insert/i.test(e.label)?css("--event2"):css("--event"); if(e.t1-e.t0<0.02){ c.fillStyle="#b8b7b1"; c.fillRect(a-0.5,top,1,h); } else c.fillRect(a,top,Math.max(1.5,b-a),h); });
+  if(!S.sig) S.sig=sigCompute(); const v=S.sig; let lo=Infinity,hi=-Infinity; for(const x of v) if(Number.isFinite(x)){lo=Math.min(lo,x);hi=Math.max(hi,x);}
+  if($("tlSig").value!=="speed"&&hi>200) hi=200; const Y=x=>top+h-(Math.min(x,hi)-lo)/((hi-lo)||1)*h;
+  c.strokeStyle="#52514e"; c.lineWidth=1.1; c.beginPath(); let on=false; const st=Math.max(1,Math.floor(D.N/(w*2)));
+  for(let f=0;f<D.N;f+=st){ if(!Number.isFinite(v[f])){on=false;continue;} const px=X(D.t[f]),py=Y(v[f]); on?c.lineTo(px,py):c.moveTo(px,py); on=true; } c.stroke();
+  // quality strip: filled dropout amber, extrapolated grey, missing red; untracked selected hand light red
+  const QCOL=[null,"#e9a23b","#9a9993","#c8452c"]; let r0=0; const s=followSide(), hx=S.H.X[s];
+  const qk=f=> D.q[f]? D.q[f] : (Number.isFinite(hx[f*NJ*3])? 0 : 4);
+  for(let f=1;f<=D.N;f++){ if(f<D.N&&qk(f)===qk(r0)) continue; const q=qk(r0); if(q){ c.fillStyle=q===4?"#f2b8ab":QCOL[q]; c.fillRect(X(D.t[r0]),top+h+1,Math.max(1.5,X(D.t[f-1])-X(D.t[r0])),3); } r0=f; }
+  c.fillStyle=css("--mark"); for(const m of S.marks){ const x=X(D.t[m]); c.beginPath(); c.moveTo(x,top+h+1); c.lineTo(x-4,H-1); c.lineTo(x+4,H-1); c.fill(); }
+  const px=X(D.t[S.f]); c.strokeStyle="#0b0b0b"; c.lineWidth=1.5; c.beginPath(); c.moveTo(px,2); c.lineTo(px,top+h+2); c.stroke();
+  c.fillStyle="#8a8984"; c.font="10px system-ui"; c.textBaseline="bottom"; c.fillText(`${T0.toFixed(1)} s`,padL,H-1); const e=`${T1.toFixed(1)} s`; c.fillText(e,padL+w-c.measureText(e).width,H-1);
+  const lab={ap:`grip aperture, ${SIDE_NAME[s].toLowerCase()} (mm)`,speed:`hand speed, ${SIDE_NAME[s].toLowerCase()} (mm/s)`,pen:"thumb/index to pen (mm)",perp:"pen angle to plane normal (°)"}[$("tlSig").value]; c.fillText(lab,padL+w/2-c.measureText(lab).width/2,H-1);
+}
+function tlSeek(ev){ const r=tl.getBoundingClientRect(), D=S.H, fr=clamp((ev.clientX-r.left-8)/(r.width-16),0,1); setFrame(idxAt(D.t[0]+fr*(D.t[D.N-1]-D.t[0]))); }
+tl.addEventListener("pointerdown",e=>{ if(!S.H) return; tl.setPointerCapture(e.pointerId); stopPlay(); tlSeek(e); });
+tl.addEventListener("pointermove",e=>{ if(e.buttons&&S.H) tlSeek(e); });
+function eventAt(f){ const t=S.H.t[f]; let best=-1; S.events.forEach((e,i)=>{ if(t>=e.t0-1e-6&&t<=e.t1+1e-6&&(best<0||e.t1-e.t0<S.events[best].t1-S.events[best].t0)) best=i; }); return best; }
+function updateReadout(){
+  if(!S.H){ $("readout").textContent="–"; $("overlay").textContent=""; return; }
+  const f=S.f, D=S.H, s=followSide(); let txt=`frame <b>${f}</b> / ${D.N-1} · t_s = <b>${D.t[f].toFixed(3)} s</b>`;
+  const a=jp(s,f,J.HandThumbTip), b=jp(s,f,J.HandIndexTip); if(okp(a)&&okp(b)) txt+=` · aperture ${(Math.hypot(...sub(a,b))*1000).toFixed(0)} mm`;
+  const A=penAim(D.t[f]); if(A) txt+=` · pen ${A.ang.toFixed(1)}° off perpendicular, ${(A.dist*1000).toFixed(0)} mm from plane`;
+  if(D.q[f]) txt+=` · <span style="color:#a2461d">${["","filled dropout (interpolated)","extrapolated","no hand data"][D.q[f]]}</span>`;
+  const e=eventAt(f); if(e>=0) txt+=` · <b>${escapeHTML(S.events[e].label)}</b> #${e+1}`;
+  $("readout").innerHTML=txt;
+  $("overlay").textContent=`${SIDE_NAME[s]} hand · ${$("space").value==="hand"?"hand-local":"world"} · ${$("viewMM").value} mm wide`;
+  document.querySelectorAll("#events div[data-e]").forEach(el=>el.classList.toggle("on",+el.dataset.e===e));
+  document.querySelectorAll("#marks div[data-f]").forEach(el=>el.classList.toggle("on",+el.dataset.f===f));
+}
+function syncEventsHand(){
+  const tr=S.trial; S.events=[]; if(tr){ const hasS=tr.events.some(e=>Number.isFinite(e.s0));
+    S.events=tr.events.map(e=>({label:e.label,t0:hasS?e.s0:e.m0,t1:hasS?(Number.isFinite(e.s1)?e.s1:e.s0):(Number.isFinite(e.m1)?e.m1:e.m0)})).filter(e=>Number.isFinite(e.t0)).sort((a,b)=>a.t0-b.t0); }
+  const labs=[...new Set(S.events.map(e=>e.label.replace(/\s*·.*$/,"")))], keep=$("evFilter").value;
+  $("evFilter").innerHTML=`<option value="">all</option>`+labs.map(l=>`<option${l===keep?" selected":""}>${escapeHTML(l)}</option>`).join("");
+  renderEvents();
+}
+function evList(){ const fl=$("evFilter").value; return S.events.map((e,i)=>({...e,i})).filter(e=>!fl||e.label.replace(/\s*·.*$/,"")===fl); }
+function renderEvents(){ const el=$("events"); $("evCount").textContent=S.events.length?`(${S.events.length})`:"";
+  if(!S.events.length){ el.innerHTML=`<div class="lab small" style="cursor:default">No events loaded</div>`; return; }
+  el.innerHTML=evList().map(e=>`<div data-e="${e.i}"><span>#${e.i+1}</span><span>${e.t0.toFixed(2)} s</span><span class="lab">${escapeHTML(e.label)}</span><span class="small">${(e.t1-e.t0).toFixed(1)}s</span></div>`).join(""); updateReadout(); }
+function gotoEvent(i){ const e=S.events[i], k=+$("evJump").value; stopPlay(); setFrame(idxAt(e.t0+(e.t1-e.t0)*k)); }
+function stepEvent(dir){ const L=evList(); if(!L.length||!S.H) return; const t=S.H.t[S.f];
+  let k= dir>0? L.findIndex(e=>e.t0>t+1e-3) : (()=>{ for(let j=L.length-1;j>=0;j--) if(L[j].t1<t-1e-3) return j; return -1; })(); if(k<0) k= dir>0? 0 : L.length-1; gotoEvent(L[k].i); }
+$("events").addEventListener("click",e=>{ const r=e.target.closest("[data-e]"); if(r) gotoEvent(+r.dataset.e); });
+
+/* ================================================================ playback */
+let raf=0, clock0=0, t0play=0;
+function startPlay(){ if(!S.H) return; S.playing=true; $("bPlay").textContent="❚❚ Pause"; if(S.f>=S.H.N-1) S.f=0; clock0=performance.now(); t0play=S.H.t[S.f]; raf=requestAnimationFrame(tick); }
+function stopPlay(){ if(!S.playing) return; S.playing=false; $("bPlay").textContent="▶ Play"; cancelAnimationFrame(raf); }
+function tick(now){ if(!S.playing) return; const t=t0play+(now-clock0)/1000*(+$("speed").value||1); S.f=idxAt(t); $("scrub").value=S.f; draw(); if(S.f>=S.H.N-1) stopPlay(); else raf=requestAnimationFrame(tick); }
+
+/* ================================================================ marks + export */
+function stemName(){ return $("prefix").value.trim()||S.stem; }
+function viewTag(){ const p=presetList().find(x=>Math.round(S.cam.az)===((((x[0]==="thumb"?thumbAz():x[0]==="little"?-thumbAz():x[2])+540)%360)-180)&&Math.round(S.cam.el)===x[3]); return p? p[0] : `az${Math.round(S.cam.az)}_el${Math.round(S.cam.el)}`; }
+function fileBase(f){ return `${stemName()}_hand${$("show").value}_f${String(f).padStart(5,"0")}_t${S.H.t[f].toFixed(3)}s_${$("space").value}_${viewTag()}`; }
+function download(blob,name){ const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),4000); }
+function expSize(){ const W=+$("expW").value||1400; return [W,Math.round(W/(+$("aspect").value||1))]; }
+async function savePNG(f=S.f){ if(!S.H) return; const [W,H]=expSize(); const c=document.createElement("canvas"); c.width=W; c.height=H; paint(c.getContext("2d"),W,H,scene(W,H,f));
+  download(await new Promise(r=>c.toBlob(r,"image/png")),fileBase(f)+".png"); }
+function saveSVG(f=S.f){ if(!S.H) return; const [W,H]=expSize(); download(new Blob([toSVG(W,H,scene(W,H,f))],{type:"image/svg+xml"}),fileBase(f)+".svg"); }
+function toggleMark(f=S.f){ const i=S.marks.indexOf(f); if(i>=0) S.marks.splice(i,1); else S.marks.push(f); S.marks.sort((a,b)=>a-b); renderMarks(); draw(); }
+function renderMarks(){ const el=$("marks"); $("markCount").textContent=S.marks.length?`(${S.marks.length})`:"";
+  ["bExportAll","bExportAllSVG","bClear"].forEach(id=>$(id).disabled=!S.marks.length);
+  if(!S.marks.length){ el.innerHTML=`<div class="lab small" style="cursor:default">Press M to mark frames</div>`; return; }
+  el.innerHTML=S.marks.map(f=>{ const e=eventAt(f); return `<div data-f="${f}"><span>f ${f}</span><span>${S.H.t[f].toFixed(2)} s</span><span class="lab">${e>=0?escapeHTML(S.events[e].label)+" #"+(e+1):""}</span><button class="x" data-del="${f}">×</button></div>`; }).join(""); }
+$("marks").addEventListener("click",e=>{ const d=e.target.closest("[data-del]"); if(d){ toggleMark(+d.dataset.del); return; } const r=e.target.closest("[data-f]"); if(r){ stopPlay(); setFrame(+r.dataset.f); } });
+
+/* ================================================================ loading */
+function renderInfo(){ const H=S.H; if(!H) return;
+  const rows=[["file",H.name],["frames",H.N.toLocaleString()],["t_s range",`${H.t[0].toFixed(2)} – ${H.t[H.N-1].toFixed(2)} s`],["rate",`≈ ${((H.N-1)/(H.t[H.N-1]-H.t[0])).toFixed(1)} Hz`],
+    ["right hand tracked",`${(100*H.has.R).toFixed(1)} % of frames`],["left hand tracked",`${(100*H.has.L).toFixed(1)} % of frames`],
+    ["row quality",`filled dropout ${H.qCounts[1]}, extrapolated ${H.qCounts[2]}, missing ${H.qCounts[3]}`],
+    ["calibration plane",S.plane?`${S.plane.pts.length} points, RMS ${(S.plane.resid*1000).toFixed(1)} mm${S.plane.log?`, ${S.plane.log.ang.toFixed(2)}° from log`:""}`:"not fitted"],["palm side",`fixed from finger curl (R ${H.palmSign.R>0?"+":"−"}, L ${H.palmSign.L>0?"+":"−"})`],["pen",S.P?`${S.P.name}`:"not loaded"]];
+  $("info").innerHTML=rows.map(([k,v])=>`<dt>${k}</dt><dd>${escapeHTML(v)}</dd>`).join(""); }
+function applyHand(H){
+  S.H=H; S.f=0; S.marks=[]; S.sig=null; S.lastFrame=null; S.fixedTarget=null; S.stem=H.name.replace(/_hand(_labelled)?\.csv$/i,"").replace(/\.[^.]+$/,"");
+  $("nHand").textContent=H.name; $("empty").style.display="none"; $("scrub").max=H.N-1; $("scrub").value=0;
+  if(H.has.R<0.05&&H.has.L>0.05){ $("show").value="L"; $("follow").value="L"; }
+  if(S.P) autoPenSign(); computePlane(); gripStats(); gunLabels(); updatePenInfo(); renderInfo(); renderMarks(); renderEvents();
+  const L=evList().filter(e=>/place/i.test(e.label)); if(L.length) gotoEvent(L[0].i); else if(S.events.length) gotoEvent(0); else setFrame(0);
+}
+function updatePenInfo(){ const a=S.penAuto; $("penInfo").textContent= !S.P? "Load the trial's _pen.csv to show the pen in the hand." : a&&a.n? `Auto direction: local ${a.sign>0?"+z":"−z"} (median thumb/index distance to the pen ${(1000*Math.min(a.gp,a.gm)).toFixed(0)} mm vs ${(1000*Math.max(a.gp,a.gm)).toFixed(0)} mm the other way; ${a.n} samples).` : "Pen loaded."; }
+async function loadBorisText(text,name,path){
+  const tab=readTableSmart(text); S.boris={name,path:path||name,...tab,cols:guessBorisCols(tab.header,tab.rows)}; buildTrials();
+  S.trial=S.boris.trials[0]||null; $("nEvents").textContent=name; syncEventsHand(); $("dEvents").open=true;
+}
+function afterIndex(){
+  const syn=FS.files.filter(isSyncedBoris).sort((a,b)=>a.name.localeCompare(b.name)), nh=FS.files.filter(f=>/_hand\.csv$/i.test(f.name)).length;
+  $("fsStatus").textContent=`${FS.roots.map(r=>r.name).join(" + ")||"folder"}: ${syn.length} synced trials, ${nh} hand files.`;
+  $("borisSel").innerHTML=`<option value="">– choose (${syn.length}) –</option>`+syn.map(f=>`<option value="${escapeHTML(f.path)}">${escapeHTML(f.name.replace(/_boris_synced\.(csv|tsv)$/i,""))}</option>`).join("");
+  $("bAddFolder").disabled=!("showDirectoryPicker" in window); $("bReconnect").style.display="none";
+}
+async function chooseTrial(){
+  const f=FS.files.find(x=>x.path===$("borisSel").value); if(!f) return; stopPlay();
+  const stem=f.name.replace(/_boris_synced\.(csv|tsv)$/i,""), dir=dirOf(f.path), same=FS.files.filter(x=>dirOf(x.path)===dir), msgs=[];
+  const pick=n=>same.find(x=>x.name.toLowerCase()===n.toLowerCase());
+  const hand=pick(stem+"_hand.csv"), pen=pick(stem+"_pen.csv")||pick(stem+"_pen_flattened.csv");
+  try{ await loadBorisText(await (await getFile(f)).text(),f.name,f.path); msgs.push(`Events ✓ ${S.events.length}`); }catch(e){ msgs.push("Events: "+e.message); }
+  if(!S.planeLog){ const pl=FS.files.find(x=>/^plane_quality_log\.csv$/i.test(x.name)); if(pl){ try{ loadPlaneLog(await (await getFile(pl)).text()); }catch(e){} } }
+  S.P=null; if(pen){ try{ S.P=parsePenSimple(await (await getFile(pen)).text(),pen.name); $("nPen").textContent=pen.name; msgs.push(`Pen ✓ ${pen.name}`); }catch(e){ msgs.push(`✗ ${pen.name}: ${e.message}`); } }
+  if(hand){ $("matchInfo").textContent=`Reading ${hand.name}…`; try{ applyHand(await parseHand(await getFile(hand))); msgs.unshift(`Hand ✓ ${hand.path}`); }catch(e){ msgs.unshift(`✗ ${hand.name}: ${e.message}`); } }
+  else msgs.unshift(`No ${stem}_hand.csv in the trial folder.`);
+  $("matchInfo").innerHTML=msgs.map(m=>`<div style="margin-top:3px">${escapeHTML(m)}</div>`).join("");
+}
+
+/* ================================================================ controls */
+$("fHand").addEventListener("change",async e=>{ const f=e.target.files[0]; if(!f) return; try{ applyHand(await parseHand(f)); }catch(err){ console.error(err); toast(err.message); $("warn").textContent=err.message; } });
+$("fPen").addEventListener("change",async e=>{ const f=e.target.files[0]; if(!f) return; try{ S.P=parsePenSimple(await f.text(),f.name); $("nPen").textContent=f.name; if(S.H) autoPenSign(); computePlane(); updatePenInfo(); renderInfo(); S.sig=null; draw(); }catch(err){ toast(err.message); } });
+$("fEvents").addEventListener("change",async e=>{ const f=e.target.files[0]; if(!f) return; try{ await loadBorisText(await f.text(),f.name); computePlane(); draw(); }catch(err){ toast(err.message); } });
+$("bFolder").onclick=()=>chooseFolder(false); $("bAddFolder").onclick=()=>chooseFolder(true); $("bReconnect").onclick=()=>reconnect();
+$("fDir").addEventListener("change",e=>{ const fl=[...e.target.files]; FS.roots=[]; FS.files=fl.filter(f=>VIDEO_RE.test(f.name)||TABLE_RE.test(f.name)).map(f=>({name:f.name,path:f.webkitRelativePath||f.name,file:f})); afterIndex(); });
+$("borisSel").addEventListener("change",chooseTrial);
+$("presets").addEventListener("click",e=>{ const b=e.target.closest("[data-p]"); if(b) applyPreset(b.dataset.p); });
+$("space").addEventListener("input",()=>{ renderPresets(); S.cam.panX=S.cam.panY=0; applyPreset(presetList()[0][0]); });
+["show","follow"].forEach(id=>$(id).addEventListener("input",()=>{ S.fixedTarget=null; S.lastFrame=null; S.sig=null; draw(); }));
+$("az").addEventListener("input",()=>setAngles(+$("az").value,S.cam.el)); $("el").addEventListener("input",()=>setAngles(S.cam.az,+$("el").value));
+$("roll").addEventListener("input",()=>{ S.cam.roll=+$("roll").value; draw(); });
+$("bReset").onclick=()=>{ S.cam.panX=S.cam.panY=0; S.fixedTarget=null; draw(); };
+["viewMM","proj","fov","hand","cMode","col","lw","jr","halo","depth","palm","tips","other","trail","trailTips","ghost","ghostStep","flagDrop","sPen","sAxes","sScale","sLabels","sPlane","planeGrid","planeA","sAim"].forEach(id=>$(id).addEventListener("input",draw));
+$("penDir").addEventListener("input",()=>{ S.sig=null; draw(); });
+const GDEF={gLen:"auto",gAng:"auto",gDia:"auto",gHL:110,gRear:127,gAtt:0,gRoll:0,gAngOff:0,gBD:30,gOp:0.35};
+function gunLabels(){ for(const [id,u] of [["gHL"," mm"],["gRear"," mm"],["gAtt"," mm"],["gRoll","°"],["gAngOff","°"],["gBD"," mm"]]) $(id+"v").textContent=$(id).value+u;
+  const C=gunCfg(); $("gunCfg").textContent=`Drawing: ${C.L} mm end effector, ${C.A}° handle, ${C.D} mm handle diameter${S.stem?` (from ${S.stem})`:""}.`+gripText(); }
+["gLen","gAng","gDia","gHL","gRear","gAtt","gRoll","gAngOff","gBD","gOp","gPen"].forEach(id=>$(id).addEventListener("change",()=>{ gripStats(); gunLabels(); }));
+["gLen","gAng","gDia","gHL","gRear","gAtt","gRoll","gAngOff","gBD","gOp","gPen"].forEach(id=>$(id).addEventListener("input",()=>{ gunLabels(); S.sig=null; updatePlaneInfo(); draw(); }));
+$("gReset").onclick=()=>{ for(const [k,v] of Object.entries(GDEF)) $(k).value=v; gunLabels(); S.sig=null; updatePlaneInfo(); draw(); };
+["aspect","bg"].forEach(id=>$(id).addEventListener("input",layoutStage));
+$("tlSig").addEventListener("input",()=>{ S.sig=null; drawTimeline(); }); $("evFilter").addEventListener("input",renderEvents);
+$("scrub").addEventListener("input",e=>{ stopPlay(); setFrame(+e.target.value); });
+$("bPlay").onclick=()=> S.playing? stopPlay() : startPlay();
+$("bBack").onclick=()=>{ stopPlay(); setFrame(S.f-1); }; $("bFwd").onclick=()=>{ stopPlay(); setFrame(S.f+1); };
+$("bPrevEv").onclick=()=>stepEvent(-1); $("bNextEv").onclick=()=>stepEvent(1);
+$("bMark").onclick=()=>toggleMark(); $("bPNG").onclick=()=>savePNG(); $("bSVG").onclick=()=>saveSVG();
+$("bExportAll").onclick=async()=>{ for(const f of S.marks){ await savePNG(f); await new Promise(r=>setTimeout(r,350)); } toast(`Saved ${S.marks.length} PNGs`); };
+$("bExportAllSVG").onclick=async()=>{ for(const f of S.marks){ saveSVG(f); await new Promise(r=>setTimeout(r,250)); } toast(`Saved ${S.marks.length} SVGs`); };
+$("bClear").onclick=()=>{ S.marks=[]; renderMarks(); draw(); };
+window.addEventListener("keydown",e=>{ if(e.target.matches("input[type=text],input[type=number],select")) return; const st=e.shiftKey?10:1;
+  if(e.key==="ArrowRight"){ e.preventDefault(); stopPlay(); setFrame(S.f+st); } else if(e.key==="ArrowLeft"){ e.preventDefault(); stopPlay(); setFrame(S.f-st); }
+  else if(e.key===" "){ e.preventDefault(); $("bPlay").click(); } else if(e.key==="m"||e.key==="M") toggleMark();
+  else if(e.key==="s"||e.key==="S"){ e.preventDefault(); savePNG(); } else if(e.key==="]") stepEvent(1); else if(e.key==="[") stepEvent(-1);
+  else if(/^[1-6]$/.test(e.key)){ const p=presetList()[+e.key-1]; if(p) applyPreset(p[0]); } });
+new ResizeObserver(()=>layoutStage()).observe($("stageWrap"));
+renderPresets(); gunLabels(); setAngles(0,0); layoutStage();
+</script>
+</body>
+</html>
